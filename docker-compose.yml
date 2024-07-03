@@ -1,0 +1,16 @@
+services:
+  browserless_chrome:
+    image: browserless/chrome
+    container_name: browserless_chrome
+    restart: on-failure
+    ports:
+      - "3000:3000/udp"
+      - "3000:3000/tcp"
+    volumes:
+      - ./.google-chrome:/data
+    cap_add:
+      - "NET_ADMIN"
+    environment:
+      - DEBUG=browserless:*
+      - DEFAULT_USER_DATA_DIR=/data
+      - CONNECTION_TIMEOUT=-1
