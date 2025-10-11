@@ -233,7 +233,7 @@ func browser(args Browser) (browser *rod.Browser, cleanup func()) {
 }
 
 func Auth(args Args) {
-	defer run(args.RunFilePath())
+	run(args.RunFilePath())
 	if args.Browser.ScreenshotPath != "" {
 		screenshotDir = args.Browser.ScreenshotPath
 		htmlDir = args.Browser.ScreenshotPath
