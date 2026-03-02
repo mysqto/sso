@@ -31,7 +31,7 @@ func (a Browser) GetUserAgent() string {
 // GetProfileLocation returns the profile location
 func (a Browser) GetProfileLocation() string {
 	if a.ProfileLocation == "" {
-		dir, err := os.MkdirTemp("sso", "google-chrome-*")
+		dir, err := os.MkdirTemp("", "sso-google-chrome-*")
 		if err != nil {
 			_ = os.RemoveAll(dir)
 		}

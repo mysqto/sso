@@ -137,19 +137,13 @@ func browser(args Browser) (browser *rod.Browser, cleanup func()) {
 	case "local":
 		log.Debugf("running SSO flow, round %d", runs)
 		lc := launcher.
-			NewUserMode().
+			New().
 			Set("no-default-browser-check").
 			Set("no-first-run").
-			Set("enable-automation").
-			Set("disable-web-security").
-			Set("allow-running-insecure-content").
+			Set("disable-sync").
 			Headless(false).
-			Devtools(true).
-			Bin("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-
-		if len(userDir) > 0 {
-			lc = lc.UserDataDir(userDir)
-		}
+			Bin("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome").
+			UserDataDir(userDir)
 
 		cleanup = lc.Cleanup
 		browser = rod.New().ControlURL(lc.MustLaunch()).Timeout(args.Timeout).MustConnect()
