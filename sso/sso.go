@@ -214,7 +214,6 @@ func browser(args Browser) (browser *rod.Browser, cleanup func()) {
 			"blockAds":          true,
 			"dumpio":            true,
 			"args": []string{
-				"--auto-open-devtools-for-tabs",
 				"--no-default-browser-check",
 				"--no-first-run",
 				"--disable-gpu",
