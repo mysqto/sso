@@ -192,7 +192,6 @@ func browser(args Browser) (browser *rod.Browser, cleanup func()) {
 
 	case "browserless-v1":
 		launchArgs := []string{
-			"--auto-open-devtools-for-tabs",
 			"--no-default-browser-check",
 			"--no-first-run",
 			"stealth=true",
@@ -245,7 +244,7 @@ func Auth(args Args) {
 	}
 	defer browser.MustClose()
 	targetURL := args.Login.URL
-	page := browser.MustPage(targetURL)
+	page := browser.MustPage("")
 	page.MustEmulate(devices.Device{
 		UserAgent:      args.Browser.GetUserAgent(),
 		AcceptLanguage: "en-US",
@@ -265,7 +264,6 @@ func Auth(args Args) {
 	log.Debugf("opening SSO page %s", targetURL)
 	page = page.
 		MustNavigate(targetURL).
-		MustReload().
 		MustWaitLoad()
 	log.Debugf("waiting 15 seconds for the page to load")
 	time.Sleep(15 * time.Second)
