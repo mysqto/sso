@@ -223,7 +223,11 @@ func browser(args Browser) (browser *rod.Browser, cleanup func()) {
 			launchArgs["userDataDir"] = userDir
 		}
 		argsBytes, _ := json.Marshal(launchArgs)
-		wsURL := args.RemoteURL + "?launch=" + string(argsBytes)
+		sep := "?"
+		if strings.Contains(args.RemoteURL, "?") {
+			sep = "&"
+		}
+		wsURL := args.RemoteURL + sep + "launch=" + string(argsBytes)
 		log.Debugf("connecting to %s", wsURL)
 		browser = rod.New().ControlURL(wsURL).Timeout(args.Timeout).MustConnect()
 	}
