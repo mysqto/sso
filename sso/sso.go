@@ -209,10 +209,8 @@ func browser(args Browser) (browser *rod.Browser, cleanup func()) {
 
 	case "browserless-v2":
 		launchArgs := map[string]any{
-			"stealth":           true,
-			"ignoreDefaultArgs": true,
-			"blockAds":          true,
-			"dumpio":            true,
+			"stealth":  true,
+			"blockAds": true,
 			"args": []string{
 				"--no-default-browser-check",
 				"--no-first-run",
@@ -227,7 +225,8 @@ func browser(args Browser) (browser *rod.Browser, cleanup func()) {
 		if strings.Contains(args.RemoteURL, "?") {
 			sep = "&"
 		}
-		wsURL := args.RemoteURL + sep + "launch=" + string(argsBytes)
+		encodedLaunch := strings.ReplaceAll(string(argsBytes), " ", "")
+		wsURL := args.RemoteURL + sep + "launch=" + encodedLaunch
 		log.Debugf("connecting to %s", wsURL)
 		browser = rod.New().ControlURL(wsURL).Timeout(args.Timeout).MustConnect()
 	}
