@@ -258,9 +258,10 @@ func Auth(args Args) {
 		Title: "MacBook Pro 14-inch, 2023",
 	})
 	log.Debugf("opening SSO page %s", targetURL)
-	page = page.
-		MustNavigate(targetURL).
-		MustWaitLoad()
+	page.MustNavigate(targetURL)
+	if err := page.WaitLoad(); err != nil {
+		log.Debugf("WaitLoad returned error (likely page redirect): %v — continuing", err)
+	}
 	log.Debugf("waiting 15 seconds for the page to load")
 	time.Sleep(15 * time.Second)
 	screenshot(page, `sso_page_after_15_seconds.png`)
