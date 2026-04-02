@@ -255,11 +255,8 @@ func captureScrollingScreenshots(page *rod.Page) {
 	scrollTo(0)
 	time.Sleep(500 * time.Millisecond)
 
-	// ~600px scroll step so each screenshot captures a readable chunk for a 16:9 slide
-	scrollStep := 600
-	if clientHeight < scrollStep {
-		scrollStep = clientHeight - 50
-	}
+	// Scroll by full viewport height — no overlap between screenshots
+	scrollStep := clientHeight
 
 	scrollPos := 0
 	part := 1
