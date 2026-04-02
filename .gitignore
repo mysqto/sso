@@ -6,3 +6,4 @@ telegram
 run
 /.aws
 /sso-config.json
+/.claude/settings.local.json
