@@ -93,7 +93,17 @@ func Serve(port int, browserDefaults Browser) {
 			},
 		}
 
-		result := BackofficeScreenshot(boArgs)
+		// go-rod uses Must* methods that panic on error — recover gracefully
+		var result BackofficeResult
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Warnf("BackofficeScreenshot panic: %v", r)
+					result = BackofficeResult{Status: "error", Error: fmt.Sprintf("browser panic: %v", r)}
+				}
+			}()
+			result = BackofficeScreenshot(boArgs)
+		}()
 
 		if result.Status != "OK" {
 			writeJSON(w, http.StatusOK, ScreenshotResponse{
