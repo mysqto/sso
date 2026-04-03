@@ -505,7 +505,7 @@ func allow(page *rod.Page) {
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		log.Debugf("waiting for SSO page to load (attempt %d/%d)", attempt, maxRetries)
-		time.Sleep(10 * time.Second)
+		time.Sleep(30 * time.Second)
 
 		// Check if the page hit an error (e.g., redirect failed after Google auth)
 		if isErrorPage(page) {

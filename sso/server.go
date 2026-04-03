@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,6 +34,10 @@ type ScreenshotResponse struct {
 // Serve starts the HTTP server on the given port.
 // browserDefaults provides the browser connection settings (mode, remote URL, profile, etc.).
 func Serve(port int, browserDefaults Browser) {
+	// Mutex to serialize browser access — browserless only supports one session at a time
+	// when using the same userDataDir profile.
+	var browserMu sync.Mutex
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -76,6 +81,9 @@ func Serve(port int, browserDefaults Browser) {
 		}
 
 		log.Debugf("POST /backoffice-screenshot url=%s path=%s", req.URL, req.ScreenshotPath)
+
+		browserMu.Lock()
+		defer browserMu.Unlock()
 
 		profileLoc := browserDefaults.ProfileLocation
 		if profileLoc == "" {
@@ -148,6 +156,9 @@ func Serve(port int, browserDefaults Browser) {
 		}
 
 		log.Debugf("POST /login url=%s email=%s", req.URL, req.Email)
+
+		browserMu.Lock()
+		defer browserMu.Unlock()
 
 		var status, errMsg string
 		func() {
