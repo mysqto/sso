@@ -14,10 +14,16 @@ import (
 	"time"
 )
 
+// BackofficeResult holds the outcome of a backoffice screenshot capture.
+type BackofficeResult struct {
+	Status string // "OK" or "LOGIN"
+	Error  string // non-empty if something went wrong
+}
+
 // BackofficeScreenshot navigates to a backoffice booking page (already authenticated
 // via persisted browserless session) and captures multi-part 16:9 viewport screenshots.
 // Each part is suitable for embedding on a PPT slide.
-func BackofficeScreenshot(args BackofficeArgs) {
+func BackofficeScreenshot(args BackofficeArgs) BackofficeResult {
 	if args.Browser.ScreenshotPath != "" {
 		screenshotDir = args.Browser.ScreenshotPath
 	}
@@ -55,8 +61,7 @@ func BackofficeScreenshot(args BackofficeArgs) {
 
 		if args.Login.Email == "" || args.Login.Password == "" || args.Login.TOTPSecret == "" {
 			log.Warnf("no SSO credentials provided — cannot auto-re-login")
-			fmt.Println("LOGIN")
-			return
+			return BackofficeResult{Status: "LOGIN", Error: "no SSO credentials provided"}
 		}
 
 		log.Debugf("attempting auto-re-login with %s", args.Login.Email)
@@ -90,8 +95,7 @@ func BackofficeScreenshot(args BackofficeArgs) {
 
 		if !clicked {
 			log.Warnf("could not find sign-in button on login page")
-			fmt.Println("LOGIN")
-			return
+			return BackofficeResult{Status: "LOGIN", Error: "could not find sign-in button"}
 		}
 		log.Debugf("clicked sign-in button, waiting for Google OAuth page")
 		time.Sleep(10 * time.Second)
@@ -116,8 +120,7 @@ func BackofficeScreenshot(args BackofficeArgs) {
 		afterURL := page.MustInfo().URL
 		if strings.Contains(afterURL, "signin") || strings.Contains(afterURL, "accounts.google.com") {
 			log.Warnf("auto-re-login failed — still on login page: %s", afterURL)
-			fmt.Println("LOGIN")
-			return
+			return BackofficeResult{Status: "LOGIN", Error: "auto-re-login failed"}
 		}
 		log.Debugf("auto-re-login succeeded, now at: %s", afterURL)
 	} else {
@@ -137,7 +140,7 @@ func BackofficeScreenshot(args BackofficeArgs) {
 	// Capture Contact/History/Booking log/Email logs sections as a separate screenshot
 	captureContactLogsSection(page)
 
-	fmt.Println("OK")
+	return BackofficeResult{Status: "OK"}
 }
 
 // googleLogin performs Google OAuth login on the current page using the provided credentials.
