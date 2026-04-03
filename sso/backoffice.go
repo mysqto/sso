@@ -96,10 +96,16 @@ func BackofficeScreenshot(args BackofficeArgs) {
 		log.Debugf("clicked sign-in button, waiting for Google OAuth page")
 		time.Sleep(10 * time.Second)
 		screenshot(page, "after_signin_click.png")
-		log.Debugf("after sign-in click URL: %s", page.MustInfo().URL)
+		afterClickURL := page.MustInfo().URL
+		log.Debugf("after sign-in click URL: %s", afterClickURL)
 
-		googleLogin(page, args.Login)
-		// After Google login, navigate back to backoffice URL
+		// Check if OAuth already completed (Google session cached in browser profile)
+		if strings.Contains(afterClickURL, "accounts.google.com") {
+			googleLogin(page, args.Login)
+		} else {
+			log.Debugf("OAuth auto-completed, skipping googleLogin (already on: %s)", afterClickURL)
+		}
+		// Navigate back to backoffice URL
 		page.MustNavigate(targetURL)
 		if err := page.WaitLoad(); err != nil {
 			log.Debugf("WaitLoad after re-login: %v", err)
@@ -127,6 +133,9 @@ func BackofficeScreenshot(args BackofficeArgs) {
 
 	// Scroll and capture multi-part screenshots
 	captureScrollingScreenshots(page)
+
+	// Capture Contact/History/Booking log/Email logs sections as a separate screenshot
+	captureContactLogsSection(page)
 
 	fmt.Println("OK")
 }
@@ -278,4 +287,88 @@ func captureScrollingScreenshots(page *rod.Page) {
 		scrollPos += scrollStep
 	}
 	log.Debugf("captured %d screenshots", part-1)
+}
+
+// captureContactLogsSection scrolls to the Contact section and captures everything
+// from Contact down to the bottom of the page (Contact, History, Booking logs, Email logs).
+func captureContactLogsSection(page *rod.Page) {
+	_ = os.MkdirAll(screenshotDir, 0755)
+
+	// Find the Contact section and get positions
+	info := page.MustEval(`() => {
+		const container = document.querySelector('.gx-layout-content') ||
+			document.querySelector('.ant-layout-content') ||
+			document.querySelector('main');
+
+		const allElements = document.querySelectorAll('h1,h2,h3,h4,h5,h6,div,span,th,td,label,p');
+		for (const el of allElements) {
+			const text = (el.textContent || '').trim().toLowerCase();
+			if (text === 'contact' || text.startsWith('contact info') || text.startsWith('contact detail')) {
+				if (container && container.scrollHeight > container.clientHeight) {
+					const rect = el.getBoundingClientRect();
+					const contactY = rect.top + container.scrollTop - 10;
+					const remaining = container.scrollHeight - contactY;
+					return { found: true, contactY: contactY, remaining: remaining, useWindow: false };
+				}
+				const rect = el.getBoundingClientRect();
+				const contactY = rect.top + window.scrollY - 10;
+				const remaining = document.documentElement.scrollHeight - contactY;
+				return { found: true, contactY: contactY, remaining: remaining, useWindow: true };
+			}
+		}
+		return { found: false, contactY: 0, remaining: 0, useWindow: false };
+	}`)
+
+	if !info.Get("found").Bool() {
+		log.Debugf("Contact section not found, skipping contact/logs screenshot")
+		return
+	}
+
+	contactY := info.Get("contactY").Int()
+	remaining := info.Get("remaining").Int()
+	useWindow := info.Get("useWindow").Bool()
+	log.Debugf("Contact section at y=%d, remaining=%d, useWindow=%v", contactY, remaining, useWindow)
+
+	// Scroll to Contact section
+	if useWindow {
+		page.MustEval(fmt.Sprintf(`() => window.scrollTo(0, %d)`, contactY))
+	} else {
+		page.MustEval(fmt.Sprintf(`() => {
+			const el = document.querySelector('.gx-layout-content') || document.querySelector('.ant-layout-content') || document.querySelector('main');
+			if (el) el.scrollTop = %d;
+		}`, contactY))
+	}
+	time.Sleep(2 * time.Second)
+
+	// Capture screenshots scrolling from Contact to the bottom
+	clientHeight := page.MustEval(`() => window.innerHeight`).Int()
+	scrollPos := contactY
+	totalHeight := contactY + remaining
+	part := 1
+
+	for scrollPos < totalHeight {
+		if useWindow {
+			page.MustEval(fmt.Sprintf(`() => window.scrollTo(0, %d)`, scrollPos))
+		} else {
+			page.MustEval(fmt.Sprintf(`() => {
+				const el = document.querySelector('.gx-layout-content') || document.querySelector('.ant-layout-content') || document.querySelector('main');
+				if (el) el.scrollTop = %d;
+			}`, scrollPos))
+		}
+		time.Sleep(1 * time.Second)
+
+		buf, err := page.Screenshot(false, &proto.PageCaptureScreenshot{
+			Format: proto.PageCaptureScreenshotFormatPng,
+		})
+		if err != nil {
+			log.Warnf("contact_logs part %d failed: %v", part, err)
+		} else {
+			filePath := path.Join(screenshotDir, fmt.Sprintf("contact_logs_%d.png", part))
+			_ = os.WriteFile(filePath, buf, 0644)
+			log.Debugf("contact_logs: %s (scroll=%d/%d)", filePath, scrollPos, totalHeight)
+		}
+		part++
+		scrollPos += clientHeight
+	}
+	log.Debugf("captured %d contact/logs screenshots", part-1)
 }
