@@ -3,6 +3,7 @@ package sso
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/go-rod/rod/lib/devices"
 	"github.com/mysqto/log"
 	"net/http"
 	"os"
@@ -76,6 +77,10 @@ func Serve(port int, browserDefaults Browser) {
 
 		log.Debugf("POST /backoffice-screenshot url=%s path=%s", req.URL, req.ScreenshotPath)
 
+		profileLoc := browserDefaults.ProfileLocation
+		if profileLoc == "" {
+			profileLoc = "/data"
+		}
 		boArgs := BackofficeArgs{
 			URL: req.URL,
 			Browser: Browser{
@@ -84,7 +89,7 @@ func Serve(port int, browserDefaults Browser) {
 				UserAgent:       browserDefaults.UserAgent,
 				ScreenshotPath:  req.ScreenshotPath,
 				Timeout:         browserDefaults.Timeout,
-				ProfileLocation: browserDefaults.ProfileLocation,
+				ProfileLocation: profileLoc,
 			},
 			Login: Login{
 				Email:      req.Email,
@@ -123,6 +128,50 @@ func Serve(port int, browserDefaults Browser) {
 		})
 	})
 
+	mux.HandleFunc("POST /login", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			URL        string `json:"url"`
+			Email      string `json:"email"`
+			Password   string `json:"password"`
+			TOTPSecret string `json:"totpSecret"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "error": "invalid JSON: " + err.Error()})
+			return
+		}
+		if req.URL == "" {
+			req.URL = "https://backoffice.wego.net"
+		}
+		if req.Email == "" || req.Password == "" || req.TOTPSecret == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "error": "email, password, and totpSecret are required"})
+			return
+		}
+
+		log.Debugf("POST /login url=%s email=%s", req.URL, req.Email)
+
+		var status, errMsg string
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Warnf("Login panic: %v", r)
+					status = "error"
+					errMsg = fmt.Sprintf("browser panic: %v", r)
+				}
+			}()
+			status, errMsg = doLogin(browserDefaults, req.URL, Login{
+				Email:      req.Email,
+				Password:   req.Password,
+				TOTPSecret: req.TOTPSecret,
+			})
+		}()
+
+		resp := map[string]string{"status": status}
+		if errMsg != "" {
+			resp["error"] = errMsg
+		}
+		writeJSON(w, http.StatusOK, resp)
+	})
+
 	addr := fmt.Sprintf(":%d", port)
 	log.Debugf("SSO HTTP server starting on %s", addr)
 
@@ -143,6 +192,94 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// doLogin navigates to the backoffice, clicks Sign In with Google, and completes
+// the Google OAuth login flow (email, password, TOTP). The session persists in the
+// browserless Chrome profile for subsequent BackofficeScreenshot calls.
+func doLogin(browserDefaults Browser, targetURL string, login Login) (status string, errMsg string) {
+	// Use /data profile to persist session for browserless Chrome
+	loginBrowser := browserDefaults
+	if loginBrowser.ProfileLocation == "" {
+		loginBrowser.ProfileLocation = "/data"
+	}
+	b, cleanup := browser(loginBrowser)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	defer b.MustClose()
+
+	page := b.MustPage("")
+	page.MustEmulate(devices.Device{
+		UserAgent:      browserDefaults.GetUserAgent(),
+		AcceptLanguage: "en-US",
+		Screen: devices.Screen{
+			DevicePixelRatio: 2,
+			Horizontal:       devices.ScreenSize{Width: 1440, Height: 810},
+			Vertical:         devices.ScreenSize{Width: 810, Height: 1440},
+		},
+		Title: "Login Session",
+	})
+
+	log.Debugf("login: navigating to %s", targetURL)
+	page.MustNavigate(targetURL)
+	if err := page.WaitLoad(); err != nil {
+		log.Debugf("login: WaitLoad error: %v", err)
+	}
+	time.Sleep(5 * time.Second)
+
+	// Check if already authenticated
+	currentURL := page.MustInfo().URL
+	if !strings.Contains(currentURL, "signin") && !strings.Contains(currentURL, "accounts.google.com") {
+		log.Debugf("login: already authenticated at %s", currentURL)
+		return "OK", ""
+	}
+
+	// Click the Sign In with Google button
+	signInXPaths := []string{
+		`//a[contains(@class, 'login-button')]`,
+		`//a[contains(@href, '/proxy?redirect=')]`,
+		`//*[contains(text(), 'Sign in')]`,
+	}
+	clicked := false
+	for _, xpath := range signInXPaths {
+		if has, el, _ := page.HasX(xpath); has {
+			log.Debugf("login: clicking sign-in element: %s", xpath)
+			el.MustClick()
+			clicked = true
+			break
+		}
+	}
+	if !clicked {
+		return "error", "could not find sign-in button"
+	}
+
+	time.Sleep(10 * time.Second)
+	afterClickURL := page.MustInfo().URL
+	log.Debugf("login: after sign-in click: %s", afterClickURL)
+
+	// If redirected to Google, perform the login
+	if strings.Contains(afterClickURL, "accounts.google.com") {
+		googleLogin(page, login)
+	} else {
+		log.Debugf("login: OAuth auto-completed (cached session)")
+	}
+
+	// Navigate back to target to verify
+	page.MustNavigate(targetURL)
+	if err := page.WaitLoad(); err != nil {
+		log.Debugf("login: WaitLoad after login: %v", err)
+	}
+	time.Sleep(10 * time.Second)
+
+	finalURL := page.MustInfo().URL
+	if strings.Contains(finalURL, "signin") || strings.Contains(finalURL, "accounts.google.com") {
+		log.Warnf("login: still on login page after auth: %s", finalURL)
+		return "error", "login completed but session not established"
+	}
+
+	log.Debugf("login: success — authenticated at %s", finalURL)
+	return "OK", ""
 }
 
 // listScreenshots scans the directory for booking_part_*.png and contact_logs_*.png files.
