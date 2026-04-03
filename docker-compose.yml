@@ -17,6 +17,9 @@ services:
       timeout: 10s
       retries: 10
       start_period: 30s
+    networks:
+      - default
+      - sso
 
   browserless_chromium:
     image: ghcr.io/browserless/chromium
