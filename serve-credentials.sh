@@ -28,14 +28,31 @@ send_response() {
     local status_text=$2
     local content_type=$3
     local body=$4
+    local extra_headers=$5
 
     local body_length=${#body}
     printf "HTTP/1.1 %s %s\r\n" "$status_code" "$status_text"
     printf "Content-Type: %s\r\n" "$content_type"
     printf "Content-Length: %d\r\n" "$body_length"
     printf "Connection: close\r\n"
+    if [ -n "$extra_headers" ]; then
+        # extra_headers is already CR-LF terminated per line
+        printf "%b" "$extra_headers"
+    fi
     printf "\r\n"
     printf "%s" "$body"
+}
+
+# Build extra-headers string exposing credential expiry to clients.
+# Emits "Header: value\r\n" (literal backslash-r-n) lines, interpreted by printf %b.
+credential_headers() {
+    local profile=$1
+    local expiry_iso ttl headers=""
+    expiry_iso=$(credentials_expiry_iso "$profile")
+    ttl=$(credentials_valid_for "$profile")
+    [ -n "$expiry_iso" ] && headers+="X-Credentials-Expiry: ${expiry_iso}\\r\\n"
+    [ "$ttl" -gt 0 ] && headers+="X-Credentials-TTL-Seconds: ${ttl}\\r\\n"
+    printf "%s" "$headers"
 }
 
 send_json() {
@@ -139,66 +156,71 @@ case "$path" in
                 ;;
         esac
 
-        # If refresh=true, invalidate ALL cached credentials to force full re-auth
-        if [ "$refresh" = "true" ]; then
-            log "Refresh requested, invalidating all cached credentials for profile: $profile"
-            # Clear both role credential cache AND SSO session cache
-            find ~/.aws/cli/cache/ -name "*.json" -delete 2>/dev/null || true
-            find ~/.aws/sso/cache/ -name "*.json" -delete 2>/dev/null || true
-        fi
+        MIN_TTL=${MIN_CREDENTIAL_TTL_SECONDS:-600}
 
-        # Check if already authenticated (no lock needed for cached creds)
-        if aws sts get-caller-identity --profile "$profile" >/dev/null 2>&1; then
-            # Credentials are cached, no browser needed
+        serve_cached() {
+            local reason=$1
+            local cred_output
             cred_output=$(get_credentials "$profile" "$format")
             if [ $? -eq 0 ] && [ -n "$cred_output" ]; then
-                log "GET /credentials?profile=$profile → 200 (cached)"
+                local hdrs
+                hdrs=$(credential_headers "$profile")
+                log "GET /credentials?profile=$profile → 200 ($reason, ttl=$(credentials_valid_for "$profile")s)"
                 if [ "$format" = "json" ]; then
-                    send_json 200 "$cred_output"
+                    send_response 200 "OK" "application/json" "$cred_output" "$hdrs"
                 else
-                    send_response 200 "OK" "text/plain" "$cred_output"
+                    send_response 200 "OK" "text/plain" "$cred_output" "$hdrs"
                 fi
-            else
-                log_warn "GET /credentials?profile=$profile → 500 Failed to export cached credentials"
-                send_json 500 '{"error": "Failed to export credentials"}'
+                return 0
             fi
-            exit 0
+            log_warn "GET /credentials?profile=$profile → 500 Failed to export credentials ($reason)"
+            send_json 500 '{"error": "Failed to export credentials"}'
+            return 1
+        }
+
+        # Fast path: cached creds with sufficient TTL, no refresh requested.
+        if [ "$refresh" != "true" ]; then
+            ttl=$(credentials_valid_for "$profile")
+            if [ "$ttl" -ge "$MIN_TTL" ]; then
+                serve_cached "cached, ttl ok"
+                exit 0
+            fi
         fi
 
-        # Need browser SSO - acquire blocking lock (browser handles one SSO at a time)
-        log "Waiting for SSO lock (profile=$profile)..."
+        # Either refresh=true or TTL below threshold — take the lock before any cache mutation
+        # so concurrent requests don't race the wipe.
+        log "Waiting for SSO lock (profile=$profile, refresh=$refresh)..."
         exec 200>"$LOCK_FILE"
         flock -x 200
 
-        # Re-check after acquiring lock — another request may have completed SSO
-        if aws sts get-caller-identity --profile "$profile" >/dev/null 2>&1; then
-            cred_output=$(get_credentials "$profile" "$format")
-            if [ $? -eq 0 ] && [ -n "$cred_output" ]; then
-                log "GET /credentials?profile=$profile → 200 (cached after lock wait)"
-                if [ "$format" = "json" ]; then
-                    send_json 200 "$cred_output"
-                else
-                    send_response 200 "OK" "text/plain" "$cred_output"
-                fi
-            else
-                log_warn "GET /credentials?profile=$profile → 500 Failed to export credentials after lock wait"
-                send_json 500 '{"error": "Failed to export credentials"}'
-            fi
+        # refresh=true: purge only role creds INSIDE the lock. Keep the SSO session so we
+        # can re-derive fresh role creds (~1s) without a browser login. If the SSO session
+        # itself is expired, get_credentials() will detect that and fall back to browser SSO.
+        if [ "$refresh" = "true" ]; then
+            log "Refresh requested, purging role credential cache for profile: $profile"
+            purge_role_cache
+        fi
+
+        # Re-check under lock — another request may have just completed SSO with fresh creds.
+        ttl=$(credentials_valid_for "$profile")
+        if [ "$ttl" -ge "$MIN_TTL" ]; then
+            serve_cached "cached after lock"
             exit 0
         fi
 
-        # Actually do SSO browser login
+        # Actually do SSO browser login via get_credentials (it handles the full flow).
         log "GET /credentials?profile=$profile → SSO browser login started..."
         cred_output=$(get_credentials "$profile" "$format")
         exit_code=$?
 
         # Lock released automatically when fd 200 closes (process exit)
         if [ $exit_code -eq 0 ] && [ -n "$cred_output" ]; then
-            log "GET /credentials?profile=$profile → 200 (SSO login)"
+            hdrs=$(credential_headers "$profile")
+            log "GET /credentials?profile=$profile → 200 (SSO login, ttl=$(credentials_valid_for "$profile")s)"
             if [ "$format" = "json" ]; then
-                send_json 200 "$cred_output"
+                send_response 200 "OK" "application/json" "$cred_output" "$hdrs"
             else
-                send_response 200 "OK" "text/plain" "$cred_output"
+                send_response 200 "OK" "text/plain" "$cred_output" "$hdrs"
             fi
         else
             log_warn "GET /credentials?profile=$profile → 500 SSO login failed"

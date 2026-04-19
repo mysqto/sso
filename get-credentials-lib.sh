@@ -120,16 +120,84 @@ list_profiles_json() {
     jq -c '.profiles | keys' "$config_file"
 }
 
+# Returns the expiry time (ISO-8601) of cached role credentials, or empty string.
+credentials_expiry_iso() {
+    local profile=$1
+    aws configure export-credentials --profile "$profile" --format process 2>/dev/null \
+        | jq -r '.Expiration // empty'
+}
+
+# Returns the unix epoch at which cached role credentials for $profile expire, or 0.
+# Uses python (always available because aws-cli depends on it) to avoid busybox date
+# limitations with ISO-8601 "T" separator and "+00:00" timezone offset.
+credentials_expiry_epoch() {
+    local profile=$1
+    local exp
+    exp=$(credentials_expiry_iso "$profile")
+    [ -z "$exp" ] && { echo 0; return; }
+    python3 -c "
+import datetime, sys
+s = sys.argv[1].replace('Z', '+00:00')
+try:
+    print(int(datetime.datetime.fromisoformat(s).timestamp()))
+except Exception:
+    print(0)
+" "$exp" 2>/dev/null || echo 0
+}
+
+# Returns seconds of life remaining for cached creds, or 0 if none/expired/error.
+credentials_valid_for() {
+    local profile=$1
+    local now exp
+    now=$(date -u +%s)
+    exp=$(credentials_expiry_epoch "$profile")
+    [ "$exp" -le "$now" ] && { echo 0; return; }
+    echo $((exp - now))
+}
+
+# Purge only the role-credentials cache. Keeps SSO session, so the next
+# `aws configure export-credentials` re-derives fresh role creds without a browser login (~1s).
+purge_role_cache() {
+    find ~/.aws/cli/cache/ -name "*.json" -delete 2>/dev/null || true
+}
+
+# Purge SSO session cache. Forces a full browser login on next auth.
+purge_sso_cache() {
+    find ~/.aws/sso/cache/ -name "*.json" -delete 2>/dev/null || true
+}
+
+# Purge everything (role + SSO session). Used when SSO session itself is suspected expired.
+purge_credential_caches() {
+    purge_role_cache
+    purge_sso_cache
+}
+
 # Get credentials for a profile
 get_credentials() {
     local profile=$1
     local format=${2:-json}
+    local min_ttl=${MIN_CREDENTIAL_TTL_SECONDS:-600}
 
-    # Check if already authenticated
-    if aws sts get-caller-identity --profile "$profile" >/dev/null 2>&1; then
-        info "Already authenticated for profile: $profile"
+    local ttl
+    ttl=$(credentials_valid_for "$profile")
+
+    # Fast path: cached role creds with sufficient TTL.
+    if [ "$ttl" -ge "$min_ttl" ] && aws sts get-caller-identity --profile "$profile" >/dev/null 2>&1; then
+        info "Already authenticated for profile: $profile (ttl=${ttl}s)"
     else
-        info "Starting AWS SSO login for profile: $profile"
+        # Role creds missing or below TTL. Purge them and try re-deriving from the SSO session
+        # (cheap: no browser). Only fall through to full SSO login if the SSO session itself is expired.
+        if [ "$ttl" -gt 0 ] && [ "$ttl" -lt "$min_ttl" ]; then
+            info "Cached role creds for $profile expire in ${ttl}s (< ${min_ttl}s) — purging role cache"
+        fi
+        purge_role_cache
+        if aws sts get-caller-identity --profile "$profile" >/dev/null 2>&1; then
+            ttl=$(credentials_valid_for "$profile")
+            info "Role creds refreshed from SSO session for $profile (ttl=${ttl}s, no browser)"
+        else
+            # SSO session also expired — do a full browser login.
+            purge_sso_cache
+            info "SSO session expired for $profile — starting browser SSO login"
 
         # Wait for browserless
         wait_for_browserless 60
@@ -174,6 +242,7 @@ get_credentials() {
 
         rm -f "$output"
         info "AWS SSO login completed successfully"
+        fi
     fi
 
     # Export credentials
@@ -195,12 +264,18 @@ get_credentials() {
     local region
     region=$(aws configure get region --profile "$profile" 2>/dev/null || true)
 
+    local expiration
+    expiration=$(credentials_expiry_iso "$profile")
+
     # Output in requested format
     case "$format" in
         json)
             local json="{\"access_key_id\": \"$access_key\", \"secret_access_key\": \"$secret_key\", \"session_token\": \"$session_token\", \"profile\": \"$profile\""
             if [ -n "$region" ]; then
                 json="$json, \"region\": \"$region\""
+            fi
+            if [ -n "$expiration" ]; then
+                json="$json, \"expiration\": \"$expiration\""
             fi
             json="$json}"
             echo "$json" | jq .

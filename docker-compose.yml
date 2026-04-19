@@ -70,6 +70,8 @@ services:
     logging: *default-logging
     env_file:
       - .sso.env
+    environment:
+      - MIN_CREDENTIAL_TTL_SECONDS=${MIN_CREDENTIAL_TTL_SECONDS:-600}
     volumes:
       - ./.aws:/root/.aws
       - ./sso-config.json:/config/sso-config.json:ro
