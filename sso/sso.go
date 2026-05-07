@@ -290,8 +290,8 @@ func Auth(args Args) {
 	screenshot(page, `google_login_page.png`)
 
 	// check do we have the allow button
-	if hasAllow, _, _ := page.HasX(`//span[contains(text(), 'Allow')]//parent::button`); hasAllow {
-		log.Debugf("Allow button found, clicking on it")
+	if hasAllow, _ := hasAllowButton(page); hasAllow {
+		log.Debugf("authorization button found, clicking on it")
 		allow(page)
 		return
 	}
@@ -421,8 +421,8 @@ inputPassword:
 	log.Debugf("waiting for 5 seconds")
 	time.Sleep(5 * time.Second)
 	// check do we have the allow button
-	if hasAllow, _, _ := page.HasX(`//span[contains(text(), 'Allow')]//parent::button`); hasAllow {
-		log.Debugf("Allow button found, clicking on it")
+	if hasAllow, _ := hasAllowButton(page); hasAllow {
+		log.Debugf("authorization button found, clicking on it")
 		allow(page)
 		return
 	}
@@ -470,16 +470,74 @@ inputPassword:
 	allow(page)
 }
 
+// allowButtonXPaths lists the XPath selectors for the SSO authorization button.
+// AWS SSO has used different button text across versions ("Allow", "Accept", etc.).
+var allowButtonXPaths = []string{
+	`//span[contains(text(), 'Allow')]//parent::button`,
+	`//button[contains(text(), 'Allow')]`,
+	`//span[contains(text(), 'Accept')]//parent::button`,
+	`//button[contains(text(), 'Accept')]`,
+}
+
+// hasAllowButton checks if any known SSO authorization button is present on the page.
+func hasAllowButton(page *rod.Page) (bool, *rod.Element) {
+	for _, xpath := range allowButtonXPaths {
+		if has, el, _ := page.HasX(xpath); has {
+			return true, el
+		}
+	}
+	return false, nil
+}
+
+// isErrorPage detects if the current page shows a browser error (e.g., "This site can't be reached").
+func isErrorPage(page *rod.Page) bool {
+	if has, _, _ := page.HasX(`//*[contains(text(), "This site can")]`); has {
+		return true
+	}
+	if has, _, _ := page.HasX(`//div[@id="main-message"]`); has {
+		return true
+	}
+	return false
+}
+
 func allow(page *rod.Page) {
-	// wait for the SSO page to load
-	log.Debugf("waiting for 5 seconds for the SSO page to load")
-	time.Sleep(10 * time.Second)
-	checkConfirmAndContinue(page)
-	screenshot(page, `sso_page_after_login.png`)
-	savePage(page, "sso_page_after_login.html")
-	page.MustElementX(`//span[contains(text(), 'Allow')]//parent::button`).
-		MustClick()
-	log.Debugf("SSO page loaded, clicked on the 'Allow' button")
+	const maxRetries = 3
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		log.Debugf("waiting for SSO page to load (attempt %d/%d)", attempt, maxRetries)
+		time.Sleep(30 * time.Second)
+
+		// Check if the page hit an error (e.g., redirect failed after Google auth)
+		if isErrorPage(page) {
+			screenshot(page, fmt.Sprintf(`sso_page_error_attempt_%d.png`, attempt))
+			if attempt < maxRetries {
+				log.Warnf("page load error detected, retrying with page reload (attempt %d/%d)", attempt, maxRetries)
+				page.MustReload()
+				continue
+			}
+			log.Fatalf("page load error persisted after %d attempts", maxRetries)
+		}
+
+		checkConfirmAndContinue(page)
+		screenshot(page, `sso_page_after_login.png`)
+		savePage(page, "sso_page_after_login.html")
+
+		// Try to find and click the authorization button
+		if found, el := hasAllowButton(page); found {
+			el.MustClick()
+			log.Debugf("SSO page loaded, clicked on the authorization button")
+			break
+		}
+
+		// Button not found — retry if possible
+		screenshot(page, fmt.Sprintf(`sso_page_no_allow_attempt_%d.png`, attempt))
+		if attempt < maxRetries {
+			log.Warnf("authorization button not found, retrying with page reload (attempt %d/%d)", attempt, maxRetries)
+			page.MustReload()
+			continue
+		}
+		log.Fatalf("authorization button not found after %d attempts — page may have changed", maxRetries)
+	}
 
 	// wait for the `Request Approved` page to load
 	log.Debugf("waiting for the 'Request Approved' page to load")

@@ -62,3 +62,10 @@ func (a Args) RunFilePath() string {
 	}
 	return a.RunFile
 }
+
+// BackofficeArgs defines arguments for backoffice screenshot capture.
+type BackofficeArgs struct {
+	URL     string  // Full backoffice booking URL
+	Browser Browser // Browser connection settings
+	Login   Login   // Optional SSO credentials for auto-re-login if session expired
+}

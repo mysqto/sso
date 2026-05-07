@@ -49,6 +49,10 @@ var (
 	browserModes = []string{"local", "rod-managed", "browserless-v1", "browserless-v2"}
 )
 
+var backofficeURL string
+var serveMode bool
+var servePort int
+
 func parseArgs() (args sso.Args, errors []string) {
 	// get arguments --sso-url --email --password --otp-secret --mode --user-agent --remote-url --screenshot-path --telegram-bot-token --browser-timeout
 	ssoURLArg := flag.String("sso-url", "", "SSO URL")
@@ -62,7 +66,14 @@ func parseArgs() (args sso.Args, errors []string) {
 	browserTimeoutArg := flag.String("browser-timeout", "", "Browser timeout")
 	browserProfileLocationArg := flag.String("profile", "", "Browser profile location")
 	runFileArg := flag.String("run-file", "", "Run file path")
+	backofficeURLArg := flag.String("backoffice-url", "", "Backoffice booking URL — screenshot mode (skip SSO auth)")
+	serveModeArg := flag.Bool("serve", false, "Start HTTP server mode")
+	servePortArg := flag.Int("serve-port", 8080, "HTTP server port (use with --serve)")
 	flag.Parse()
+
+	backofficeURL = getOptionalArg(backofficeURLArg, "BACKOFFICE_URL")
+	serveMode = *serveModeArg
+	servePort = *servePortArg
 
 	var mode, remoteURL string
 	args.Login.URL = getArg(ssoURLArg, &errors, "SSO_URL", "SSO URL")
@@ -97,6 +108,25 @@ func parseArgs() (args sso.Args, errors []string) {
 
 func main() {
 	args, errors := parseArgs()
+
+	// Backoffice screenshot mode — SSO credentials optional (for auto-re-login)
+	if backofficeURL != "" {
+		boArgs := sso.BackofficeArgs{
+			URL:     backofficeURL,
+			Browser: args.Browser,
+			Login:   args.Login,
+		}
+		result := sso.BackofficeScreenshot(boArgs)
+		fmt.Println(result.Status)
+		return
+	}
+
+	// HTTP server mode
+	if serveMode {
+		sso.Serve(servePort, args.Browser)
+		return
+	}
+
 	if len(errors) > 0 {
 		log.Fatalf("fatal:\n%v", strings.Join(errors, "\n"))
 	}
