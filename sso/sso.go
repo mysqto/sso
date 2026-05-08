@@ -239,6 +239,14 @@ func Auth(args Args) {
 		defer cleanup()
 	}
 	defer browser.MustClose()
+
+	var samlDone chan struct{}
+	if args.Login.SAMLOutput != "" {
+		var stop func()
+		samlDone, stop = captureSAML(browser, args.Login.SAMLOutput, args.Login.SAMLSkip)
+		defer stop()
+	}
+
 	targetURL := args.Login.URL
 	page := browser.MustPage("")
 	page.MustEmulate(devices.Device{
@@ -263,7 +271,10 @@ func Auth(args Args) {
 		log.Debugf("WaitLoad returned error (likely page redirect): %v — continuing", err)
 	}
 	log.Debugf("waiting 15 seconds for the page to load")
-	time.Sleep(15 * time.Second)
+	if waitOrSAML(samlDone, 15*time.Second) {
+		log.Debugf("SAML response captured before any interaction was required")
+		return
+	}
 	screenshot(page, `sso_page_after_15_seconds.png`)
 	savePage(page, "sso_page_after_15_seconds.html")
 
@@ -292,7 +303,7 @@ func Auth(args Args) {
 	// check do we have the allow button
 	if hasAllow, _, _ := page.HasX(`//span[contains(text(), 'Allow')]//parent::button`); hasAllow {
 		log.Debugf("Allow button found, clicking on it")
-		allow(page)
+		allow(page, samlDone)
 		return
 	}
 
@@ -423,7 +434,7 @@ inputPassword:
 	// check do we have the allow button
 	if hasAllow, _, _ := page.HasX(`//span[contains(text(), 'Allow')]//parent::button`); hasAllow {
 		log.Debugf("Allow button found, clicking on it")
-		allow(page)
+		allow(page, samlDone)
 		return
 	}
 
@@ -467,19 +478,39 @@ inputPassword:
 	log.Debugf("clicked on the 'Next' button")
 
 	// allow the SSO page
-	allow(page)
+	allow(page, samlDone)
 }
 
-func allow(page *rod.Page) {
+func allow(page *rod.Page, samlDone chan struct{}) {
 	// wait for the SSO page to load
-	log.Debugf("waiting for 5 seconds for the SSO page to load")
-	time.Sleep(10 * time.Second)
+	log.Debugf("waiting for 10 seconds for the SSO page to load")
+	if waitOrSAML(samlDone, 10*time.Second) {
+		log.Debugf("SAML response captured before clicking 'Allow'")
+		return
+	}
 	checkConfirmAndContinue(page)
 	screenshot(page, `sso_page_after_login.png`)
 	savePage(page, "sso_page_after_login.html")
-	page.MustElementX(`//span[contains(text(), 'Allow')]//parent::button`).
-		MustClick()
-	log.Debugf("SSO page loaded, clicked on the 'Allow' button")
+
+	if hasAllow, allowBtn, _ := page.HasX(`//span[contains(text(), 'Allow')]//parent::button`); hasAllow {
+		allowBtn.MustClick()
+		log.Debugf("SSO page loaded, clicked on the 'Allow' button")
+	} else if samlDone == nil {
+		log.Fatalf("'Allow' button not found")
+	} else {
+		log.Debugf("'Allow' button not present; waiting for SAML response")
+	}
+
+	if samlDone != nil {
+		log.Debugf("waiting for SAML response capture (up to 60s)")
+		select {
+		case <-samlDone:
+			log.Debugf("SAML response captured")
+		case <-time.After(60 * time.Second):
+			log.Fatalf("timed out waiting for SAML response")
+		}
+		return
+	}
 
 	// wait for the `Request Approved` page to load
 	log.Debugf("waiting for the 'Request Approved' page to load")
@@ -489,6 +520,21 @@ func allow(page *rod.Page) {
 	log.Debugln("Request approved")
 	screenshot(page, `sso_request_approved.png`)
 	page.MustClose()
+}
+
+// waitOrSAML waits for the given duration unless samlDone fires first.
+// Returns true if samlDone fired (caller should bail out of the flow).
+func waitOrSAML(samlDone chan struct{}, d time.Duration) bool {
+	if samlDone == nil {
+		time.Sleep(d)
+		return false
+	}
+	select {
+	case <-samlDone:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 func checkAndBypassPasskey(page *rod.Page) {

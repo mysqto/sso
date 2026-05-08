@@ -46,6 +46,8 @@ type Login struct {
 	Email      string
 	Password   string
 	TOTPSecret string
+	SAMLOutput string
+	SAMLSkip   int
 }
 
 // Args defines the arguments for the sso

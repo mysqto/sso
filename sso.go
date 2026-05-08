@@ -6,6 +6,7 @@ import (
 	"github.com/mysqto/log"
 	"os"
 	"sso/sso"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -62,6 +63,8 @@ func parseArgs() (args sso.Args, errors []string) {
 	browserTimeoutArg := flag.String("browser-timeout", "", "Browser timeout")
 	browserProfileLocationArg := flag.String("profile", "", "Browser profile location")
 	runFileArg := flag.String("run-file", "", "Run file path")
+	samlOutputArg := flag.String("saml-output", "", "Capture SAMLResponse to this path ('-' for stdout); when set the device-approval step is skipped")
+	samlSkipArg := flag.Int("saml-skip", 0, "Number of leading SAMLResponse POSTs to let through before capturing (useful for chained IdPs like AWS SSO)")
 	flag.Parse()
 
 	var mode, remoteURL string
@@ -78,6 +81,17 @@ func parseArgs() (args sso.Args, errors []string) {
 	args.Browser.ProfileLocation = getOptionalArg(browserProfileLocationArg, "CHROME_PROFILE")
 	browserTimeoutStr := getOptionalArg(browserTimeoutArg, "BROWSER_TIMEOUT")
 	args.RunFile = getOptionalArg(runFileArg, "RUN_FILE")
+	args.Login.SAMLOutput = getOptionalArg(samlOutputArg, "SSO_SAML_OUTPUT")
+	if samlSkipArg != nil {
+		args.Login.SAMLSkip = *samlSkipArg
+	}
+	if args.Login.SAMLSkip == 0 {
+		if env := os.Getenv("SSO_SAML_SKIP"); env != "" {
+			if n, err := strconv.Atoi(env); err == nil && n >= 0 {
+				args.Login.SAMLSkip = n
+			}
+		}
+	}
 	args.Browser.Timeout = 4 * time.Minute
 	if browserTimeoutStr != "" {
 		timout, err := time.ParseDuration(browserTimeoutStr)
