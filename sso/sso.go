@@ -301,7 +301,7 @@ func Auth(args Args) {
 	screenshot(page, `google_login_page.png`)
 
 	// check do we have the allow button
-	if hasAllow, _, _ := page.HasX(`//span[contains(text(), 'Allow')]//parent::button`); hasAllow {
+	if hasAllow, _, _ := page.HasX(`//span[contains(text(), 'Allow')]/ancestor::button[1]`); hasAllow {
 		log.Debugf("Allow button found, clicking on it")
 		allow(page, samlDone)
 		return
@@ -315,9 +315,9 @@ func Auth(args Args) {
 	if hasVerifyItsYou, _, _ := page.HasX(`//span[contains(text(), 'Verify it’s you')]`); hasVerifyItsYou {
 		log.Debugf("`Verify it’s you` page found, will try to find the next button")
 		// check do we have the `Next` button
-		if hasNext, _, _ := page.HasX(`//span[contains(text(), 'Next')]//parent::button`); hasNext {
+		if hasNext, _, _ := page.HasX(`//span[contains(text(), 'Next')]/ancestor::button[1]`); hasNext {
 			log.Debugf("Next button found, clicking on it")
-			page.MustElementX(`//span[contains(text(), 'Next')]//parent::button`).
+			page.MustElementX(`//span[contains(text(), 'Next')]/ancestor::button[1]`).
 				MustClick()
 			log.Debugf("clicked on the 'Next' button")
 			goto inputPassword
@@ -377,7 +377,7 @@ func Auth(args Args) {
 	log.Debugf("email address filled")
 
 	log.Debugf("clicking on the 'Next' button")
-	page.MustElementX(`//span[contains(text(), 'Next')]/parent::button`).
+	page.MustElementX(`//span[contains(text(), 'Next')]/ancestor::button[1]`).
 		MustClick().
 		MustType(input.Enter)
 	log.Debugf("clicked on the 'Next' button")
@@ -423,7 +423,7 @@ inputPassword:
 
 	// click on the "Next" button
 	log.Debugf("clicking on the 'Next' button")
-	_ = page.MustElementX(`//span[contains(text(), 'Next')]/parent::button`).
+	_ = page.MustElementX(`//span[contains(text(), 'Next')]/ancestor::button[1]`).
 		MustClick()
 	screenshot(page, `google_login_pasword_page_next.png`)
 	log.Debugf("clicked on the 'Next' button")
@@ -432,7 +432,7 @@ inputPassword:
 	log.Debugf("waiting for 5 seconds")
 	time.Sleep(5 * time.Second)
 	// check do we have the allow button
-	if hasAllow, _, _ := page.HasX(`//span[contains(text(), 'Allow')]//parent::button`); hasAllow {
+	if hasAllow, _, _ := page.HasX(`//span[contains(text(), 'Allow')]/ancestor::button[1]`); hasAllow {
 		log.Debugf("Allow button found, clicking on it")
 		allow(page, samlDone)
 		return
@@ -445,10 +445,10 @@ inputPassword:
 	log.Debugf("2FA page loaded")
 
 	// check if we have the "Try another way" button
-	if hasTryAnotherWay, _, _ := page.HasX(`//span[contains(text(), 'Try another way')]//parent::button`); hasTryAnotherWay {
+	if hasTryAnotherWay, _, _ := page.HasX(`//span[contains(text(), 'Try another way')]/ancestor::button[1]`); hasTryAnotherWay {
 		// click on the "Try another way" button
 		log.Debugf("`Try another way` button found, clicking on it")
-		page.MustElementX(`//span[contains(text(), 'Try another way')]/parent::button`).
+		page.MustElementX(`//span[contains(text(), 'Try another way')]/ancestor::button[1]`).
 			MustClick()
 		log.Debugf("clicked on the 'Try another way' button")
 		log.Debugf("waiting for 5 seconds")
@@ -511,11 +511,15 @@ func allow(page *rod.Page, samlDone chan struct{}) {
 		log.Debugf("SAML response captured before clicking 'Allow'")
 		return
 	}
+	// Some Chrome builds (e.g. macOS) show a 'Simplify your sign-in' /
+	// passkey-create interstitial after OTP. It's optional and not always
+	// rendered, so probe briefly and dismiss only if present.
+	dismissPasskeyPrompt(page)
 	checkConfirmAndContinue(page)
 	screenshot(page, `sso_page_after_login.png`)
 	savePage(page, "sso_page_after_login.html")
 
-	if hasAllow, allowBtn, _ := page.HasX(`//span[contains(text(), 'Allow')]//parent::button`); hasAllow {
+	if hasAllow, allowBtn, _ := page.HasX(`//span[contains(text(), 'Allow')]/ancestor::button[1]`); hasAllow {
 		allowBtn.MustClick()
 		log.Debugf("SSO page loaded, clicked on the 'Allow' button")
 	} else if samlDone == nil {
@@ -560,6 +564,43 @@ func waitOrSAML(samlDone chan struct{}, d time.Duration) bool {
 	}
 }
 
+// dismissPasskeyPrompt clicks 'Not now' on Google's passkey-creation
+// interstitial ('Simplify your sign-in') if it's shown. Most platforms
+// don't render this card, so the function is a no-op when the prompt
+// isn't present and never blocks the flow.
+func dismissPasskeyPrompt(page *rod.Page) {
+	// Probe briefly — page is already loaded by the caller, so a short
+	// timeout is enough to detect a rendered prompt without delaying
+	// the common case where it isn't.
+	for _, marker := range []string{
+		`//*[contains(text(), 'Simplify your sign-in')]`,
+		`//*[contains(text(), 'Create a passkey')]`,
+		`//*[contains(text(), 'Set up a passkey')]`,
+	} {
+		if has, _, _ := page.HasX(marker); has {
+			log.Debugf("passkey-create prompt detected (%s), clicking 'Not now'", marker)
+			notNowXPaths := []string{
+				`//span[contains(text(), 'Not now')]/ancestor::button[1]`,
+				`//*[@role='button' and contains(., 'Not now')]`,
+				`//button[contains(., 'Not now')]`,
+			}
+			for _, xp := range notNowXPaths {
+				if hasBtn, btn, _ := page.HasX(xp); hasBtn && btn != nil {
+					btn.MustClick()
+					log.Debugf("clicked 'Not now' via %s", xp)
+					time.Sleep(3 * time.Second)
+					screenshot(page, `passkey_prompt_dismissed.png`)
+					return
+				}
+			}
+			log.Warnf("passkey prompt detected but 'Not now' button not found; continuing")
+			screenshot(page, `passkey_prompt_no_dismiss_button.png`)
+			savePage(page, "passkey_prompt_no_dismiss_button.html")
+			return
+		}
+	}
+}
+
 func checkAndBypassPasskey(page *rod.Page) {
 	// check if `passkey` page is loaded
 	hasPasskeySpan, _, _ := page.HasX(`//span[contains(text(), 'passkey')]`)
@@ -567,9 +608,9 @@ func checkAndBypassPasskey(page *rod.Page) {
 	if hasPasskeySpan || hasPasskeyDiv {
 		log.Debugf("passkey page found, will try to find the `Try another way` button")
 		// check do we have the `Try another way` button
-		if hasTryAnotherWay, _, _ := page.HasX(`//span[contains(text(), 'Try another way')]//parent::button`); hasTryAnotherWay {
+		if hasTryAnotherWay, _, _ := page.HasX(`//span[contains(text(), 'Try another way')]/ancestor::button[1]`); hasTryAnotherWay {
 			log.Debugf("Try another way button found, clicking on it")
-			page.MustElementX(`//span[contains(text(), 'Try another way')]//parent::button`).
+			page.MustElementX(`//span[contains(text(), 'Try another way')]/ancestor::button[1]`).
 				MustClick()
 			log.Debugf("clicked on the 'Try another way' button")
 		}

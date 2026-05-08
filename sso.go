@@ -55,7 +55,7 @@ func parseArgs() (args sso.Args, errors []string) {
 	ssoURLArg := flag.String("sso-url", "", "SSO URL")
 	emailArg := flag.String("email", "", "Email")
 	passwordArg := flag.String("password", "", "Password")
-	otpSecretArg := flag.String("otp-secret, ", "", "OTP secret")
+	otpSecretArg := flag.String("otp-secret", "", "OTP secret")
 	modeArg := flag.String("mode", "", "Browser mode, available mode are: local, rod-managed, browserless-v1, browserless-v2")
 	remoteURLArg := flag.String("remote-url", "", "Remote URL")
 	userAgentArg := flag.String("user-agent", "", "User agent")
