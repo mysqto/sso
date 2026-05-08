@@ -128,6 +128,29 @@ func screenshot(page *rod.Page, file string) *rod.Page {
 		return page
 	}
 	log.Debugf("screenshot saved to %s", filePath)
+
+	// Save HTML alongside the screenshot under the same timestamped basename
+	// so failures can be inspected page-by-page without re-running the flow.
+	htmlPath := path.Join(htmlDir,
+		fmt.Sprintf("%06d_%s_%s.html", runs,
+			fileName,
+			time.Now().Format("20060102150405")))
+	if _, statErr := os.Stat(htmlDir); os.IsNotExist(statErr) {
+		if mkErr := os.Mkdir(htmlDir, 0755); mkErr != nil {
+			log.Warnf("failed to create directory %s: %v", htmlDir, mkErr)
+			return page
+		}
+	}
+	if html, herr := page.HTML(); herr == nil {
+		if werr := os.WriteFile(htmlPath, []byte(html), 0644); werr != nil {
+			log.Warnf("failed to write HTML: %v", werr)
+		} else {
+			log.Debugf("HTML saved to %s", htmlPath)
+		}
+	} else {
+		log.Warnf("failed to get HTML: %v", herr)
+	}
+
 	return page
 }
 
@@ -446,13 +469,10 @@ inputPassword:
 
 	// check if we have the "Try another way" button
 	if hasTryAnotherWay, _, _ := page.HasX(`//span[contains(text(), 'Try another way')]/ancestor::button[1]`); hasTryAnotherWay {
-		// click on the "Try another way" button
-		log.Debugf("`Try another way` button found, clicking on it")
-		page.MustElementX(`//span[contains(text(), 'Try another way')]/ancestor::button[1]`).
-			MustClick()
-		log.Debugf("clicked on the 'Try another way' button")
-		log.Debugf("waiting for 5 seconds")
-		time.Sleep(5 * time.Second)
+		// Click "Try another way". Google's jsaction sometimes ignores rod's
+		// native click on this card; fall through to JS .click() then a
+		// keyboard Enter on the focused button if the page doesn't navigate.
+		clickTryAnotherWay(page)
 	}
 
 	// snapshot the verification-options page before clicking; Google rewords
@@ -476,12 +496,14 @@ inputPassword:
 		if has, el, _ := page.HasX(xpath); has && el != nil {
 			el.MustClick()
 			log.Debugf("clicked Authenticator option via xpath: %s", xpath)
+			screenshot(page, `google_login_2fa_after_authenticator_click.png`)
 			clicked = true
 			break
 		}
 	}
 	if !clicked {
-		log.Fatalf("could not find Authenticator-app verification option; see screenshots/google_login_2fa_options.{png,html} for the page content")
+		screenshot(page, `google_login_2fa_options_no_match.png`)
+		log.Fatalf("could not find Authenticator-app verification option; see screenshots/ + html/ dumps for the page content")
 	}
 
 	// fill in the OTP code
@@ -499,6 +521,7 @@ inputPassword:
 	page.MustElementX(`//*[@id="totpNext"]`).
 		MustClick()
 	log.Debugf("clicked on the 'Next' button")
+	screenshot(page, `google_login_2fa_after_otp_next.png`)
 
 	// allow the SSO page
 	allow(page, samlDone)
@@ -564,6 +587,62 @@ func waitOrSAML(samlDone chan struct{}, d time.Duration) bool {
 	}
 }
 
+// clickTryAnotherWay clicks the "Try another way" button on the 2FA page
+// and verifies the page actually navigated. Google's jsaction framework
+// sometimes ignores rod's native MustClick on this card, so we escalate
+// through three click strategies before giving up.
+func clickTryAnotherWay(page *rod.Page) {
+	xpath := `//span[contains(text(), 'Try another way')]/ancestor::button[1]`
+	stillOnApproval := func() bool {
+		// "Open the Gmail app" / "Don't ask again" identify the phone-approval
+		// card; if we're past it those texts are gone.
+		has1, _, _ := page.HasX(`//*[contains(text(), 'Open the Gmail app')]`)
+		has2, _, _ := page.HasX(`//*[contains(text(), "Don") and contains(text(), "ask again on this device")]`)
+		return has1 || has2
+	}
+
+	tryStrategy := func(name string, do func()) bool {
+		log.Debugf("clicking 'Try another way' via %s", name)
+		do()
+		screenshot(page, fmt.Sprintf(`tay_after_%s.png`, name))
+		log.Debugf("waiting for 5 seconds after %s", name)
+		time.Sleep(5 * time.Second)
+		if !stillOnApproval() {
+			log.Debugf("'Try another way' navigated away via %s", name)
+			return true
+		}
+		log.Warnf("page still on phone-approval after %s — escalating", name)
+		return false
+	}
+
+	// Strategy 1: rod's native MustClick (mouse press/release via CDP).
+	if tryStrategy("native_click", func() {
+		page.MustElementX(xpath).MustClick()
+	}) {
+		return
+	}
+
+	// Strategy 2: JavaScript element.click() — fires a synthetic click that
+	// most jsaction handlers accept.
+	if tryStrategy("js_click", func() {
+		btn := page.MustElementX(xpath)
+		btn.MustEval(`() => this.click()`)
+	}) {
+		return
+	}
+
+	// Strategy 3: focus the button and press Enter on the keyboard.
+	if tryStrategy("focus_enter", func() {
+		btn := page.MustElementX(xpath)
+		btn.MustFocus()
+		page.Keyboard.MustType(input.Enter)
+	}) {
+		return
+	}
+
+	log.Fatalf("'Try another way' click failed across all strategies; see screenshots/ + html/ dumps for the page content")
+}
+
 // dismissPasskeyPrompt clicks 'Not now' on Google's passkey-creation
 // interstitial ('Simplify your sign-in') if it's shown. Most platforms
 // don't render this card, so the function is a no-op when the prompt
@@ -572,17 +651,31 @@ func dismissPasskeyPrompt(page *rod.Page) {
 	// Probe briefly — page is already loaded by the caller, so a short
 	// timeout is enough to detect a rendered prompt without delaying
 	// the common case where it isn't.
+	stillOnPrompt := func() bool {
+		// "Simplify your sign-in" is the canonical title; if the click
+		// dismissed the card we won't find it on the next page.
+		has, _, _ := page.HasX(`//*[contains(text(), 'Simplify your sign-in')]`)
+		return has
+	}
+
 	for _, marker := range []string{
 		`//*[contains(text(), 'Simplify your sign-in')]`,
 		`//*[contains(text(), 'Create a passkey')]`,
 		`//*[contains(text(), 'Set up a passkey')]`,
 	} {
 		if has, _, _ := page.HasX(marker); has {
+			screenshot(page, `passkey_prompt_detected.png`)
 			log.Debugf("passkey-create prompt detected (%s), clicking 'Not now'", marker)
+			// Prefer Google's own data-secondary-action-label hook — it's
+			// the most stable selector across Material Design rewrites and
+			// guarantees we click the secondary (cancel) action even if the
+			// visible label changes capitalisation.
 			notNowXPaths := []string{
+				`//div[@data-secondary-action-label='Not now']//button[.//span[text()='Not now']]`,
+				`//div[@data-secondary-action-label]//button[.//span[contains(text(), 'Not now')]]`,
+				`//span[text()='Not now']/ancestor::button[1]`,
 				`//span[contains(text(), 'Not now')]/ancestor::button[1]`,
-				`//*[@role='button' and contains(., 'Not now')]`,
-				`//button[contains(., 'Not now')]`,
+				`//button[.//span[contains(text(), 'Not now')]]`,
 			}
 			for _, xp := range notNowXPaths {
 				if hasBtn, btn, _ := page.HasX(xp); hasBtn && btn != nil {
@@ -590,12 +683,14 @@ func dismissPasskeyPrompt(page *rod.Page) {
 					log.Debugf("clicked 'Not now' via %s", xp)
 					time.Sleep(3 * time.Second)
 					screenshot(page, `passkey_prompt_dismissed.png`)
-					return
+					if !stillOnPrompt() {
+						return
+					}
+					log.Warnf("'Not now' click via %s did not dismiss the prompt; trying next selector", xp)
 				}
 			}
-			log.Warnf("passkey prompt detected but 'Not now' button not found; continuing")
+			log.Warnf("passkey prompt could not be dismissed via any selector; continuing")
 			screenshot(page, `passkey_prompt_no_dismiss_button.png`)
-			savePage(page, "passkey_prompt_no_dismiss_button.html")
 			return
 		}
 	}
