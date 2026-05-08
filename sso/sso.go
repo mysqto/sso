@@ -455,11 +455,34 @@ inputPassword:
 		time.Sleep(5 * time.Second)
 	}
 
-	// click on the "Get a verification code from the Google Authenticator app" button
-	log.Debugf("clicking on the 'Get a verification code from the Google Authenticator app' button")
-	page.MustElementX(`//div[contains(text(), 'Get a verification code from the')]//parent::div`).
-		MustClick()
-	log.Debugf("clicked on the 'Get a verification code from the Google Authenticator app' button")
+	// snapshot the verification-options page before clicking; Google rewords
+	// these options occasionally and these artifacts let us adapt without
+	// re-running the full flow blind.
+	screenshot(page, `google_login_2fa_options.png`)
+	savePage(page, "google_login_2fa_options.html")
+
+	// click the "Authenticator app" option. Google has used several wordings;
+	// try each known variant and log the actual page on failure.
+	log.Debugf("clicking on the Authenticator app option")
+	authenticatorXPaths := []string{
+		`//div[contains(text(), 'Get a verification code from the')]//parent::div`,
+		`//div[contains(text(), 'Google Authenticator')]//ancestor::li[1]`,
+		`//div[contains(text(), 'Authenticator app')]//ancestor::li[1]`,
+		`//li[.//div[contains(text(), 'Authenticator')]]`,
+		`//div[@role='link' and .//*[contains(text(), 'Authenticator')]]`,
+	}
+	clicked := false
+	for _, xpath := range authenticatorXPaths {
+		if has, el, _ := page.HasX(xpath); has && el != nil {
+			el.MustClick()
+			log.Debugf("clicked Authenticator option via xpath: %s", xpath)
+			clicked = true
+			break
+		}
+	}
+	if !clicked {
+		log.Fatalf("could not find Authenticator-app verification option; see screenshots/google_login_2fa_options.{png,html} for the page content")
+	}
 
 	// fill in the OTP code
 	log.Debugf("filling in the OTP code")
