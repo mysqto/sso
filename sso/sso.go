@@ -159,16 +159,27 @@ func browser(args Browser) (browser *rod.Browser, cleanup func()) {
 	switch args.Mode {
 	case "local":
 		log.Debugf("running SSO flow, round %d", runs)
+		// Default: let rod auto-detect Chrome via launcher's standard search
+		// (macOS: /Applications/..., Linux: /usr/bin/google-chrome, etc.).
+		// Override via --bin / CHROME_BIN if rod can't find it or you need
+		// a specific version (e.g. Chromium, Brave, beta channel).
 		lc := launcher.
 			New().
 			Set("no-default-browser-check").
 			Set("no-first-run").
 			Set("disable-sync").
 			Headless(false).
-			Bin("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome").
 			UserDataDir(userDir)
+		if args.Bin != "" {
+			log.Debugf("using explicit chrome binary: %s", args.Bin)
+			lc = lc.Bin(args.Bin)
+		}
 
-		cleanup = lc.Cleanup
+		// User explicitly chose --profile path; preserve its contents
+		// (cookies, trusted-device tokens, etc.) so subsequent runs can
+		// reuse the session and skip 2FA. lc.Cleanup would rm -rf the
+		// userDataDir on exit — bind a no-op instead.
+		cleanup = func() {}
 		browser = rod.New().ControlURL(lc.MustLaunch()).Timeout(args.Timeout).MustConnect()
 	case "rod-managed":
 		lc := launcher.
@@ -590,20 +601,44 @@ func waitOrSAML(samlDone chan struct{}, d time.Duration) bool {
 // clickTryAnotherWay clicks the "Try another way" button on the 2FA page
 // and verifies the page actually navigated. Google's jsaction framework
 // sometimes ignores rod's native MustClick on this card, so we escalate
-// through three click strategies before giving up.
+// through three click strategies before giving up. Each strategy is
+// wrapped in a per-attempt timeout so a hanging click can't stall the
+// whole flow.
 func clickTryAnotherWay(page *rod.Page) {
 	xpath := `//span[contains(text(), 'Try another way')]/ancestor::button[1]`
 	stillOnApproval := func() bool {
-		// "Open the Gmail app" / "Don't ask again" identify the phone-approval
-		// card; if we're past it those texts are gone.
 		has1, _, _ := page.HasX(`//*[contains(text(), 'Open the Gmail app')]`)
 		has2, _, _ := page.HasX(`//*[contains(text(), "Don") and contains(text(), "ask again on this device")]`)
 		return has1 || has2
 	}
 
+	// runWithTimeout invokes do() in a goroutine and returns true if it
+	// completed, false on timeout. Recovers from rod panics.
+	runWithTimeout := func(name string, timeout time.Duration, do func()) bool {
+		done := make(chan struct{})
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Warnf("strategy %s panicked: %v", name, r)
+				}
+				close(done)
+			}()
+			do()
+		}()
+		select {
+		case <-done:
+			return true
+		case <-time.After(timeout):
+			log.Warnf("strategy %s timed out after %v", name, timeout)
+			return false
+		}
+	}
+
 	tryStrategy := func(name string, do func()) bool {
 		log.Debugf("clicking 'Try another way' via %s", name)
-		do()
+		if !runWithTimeout(name, 6*time.Second, do) {
+			return false
+		}
 		screenshot(page, fmt.Sprintf(`tay_after_%s.png`, name))
 		log.Debugf("waiting for 5 seconds after %s", name)
 		time.Sleep(5 * time.Second)

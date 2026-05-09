@@ -18,6 +18,9 @@ type Browser struct {
 	ScreenshotPath  string
 	Timeout         time.Duration
 	ProfileLocation string
+	// Bin is an explicit Chrome/Chromium binary path used by `--mode local`.
+	// When empty, rod's launcher auto-detects the OS-specific install.
+	Bin string
 }
 
 // GetUserAgent returns the user agent
