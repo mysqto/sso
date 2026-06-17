@@ -105,7 +105,10 @@ func BackofficeScreenshot(args BackofficeArgs) BackofficeResult {
 
 		// Check if OAuth already completed (Google session cached in browser profile)
 		if strings.Contains(afterClickURL, "accounts.google.com") {
-			googleLogin(page, args.Login)
+			if loginErr := googleLogin(page, args.Login); loginErr != nil {
+				log.Warnf("auto-re-login: googleLogin failed: %v", loginErr)
+				return BackofficeResult{Status: "LOGIN", Error: "auto-re-login failed: " + loginErr.Error()}
+			}
 		} else {
 			log.Debugf("OAuth auto-completed, skipping googleLogin (already on: %s)", afterClickURL)
 		}
@@ -143,24 +146,44 @@ func BackofficeScreenshot(args BackofficeArgs) BackofficeResult {
 	return BackofficeResult{Status: "OK"}
 }
 
-// googleLogin performs Google OAuth login on the current page using the provided credentials.
-func googleLogin(page *rod.Page, login Login) {
+// googleLogin performs Google OAuth login on the current page using the provided
+// credentials. It returns a descriptive error naming the step that failed (rather
+// than panicking or silently returning), and screenshots each step so the next
+// real failure is diagnosable. Screenshots land in screenshotDir.
+func googleLogin(page *rod.Page, login Login) (err error) {
 	email := login.Email
 	password := login.Password
-	log.Debugf("starting Google login for %s", email)
+	step := "start"
+
+	// go-rod Must* methods panic on missing elements. Convert a panic into a
+	// descriptive error that names the step we were on, plus a screenshot —
+	// instead of bubbling up as a generic "browser panic".
+	defer func() {
+		if r := recover(); r != nil {
+			screenshot(page, "google_login_panic.png")
+			err = fmt.Errorf("panicked at step %q: %v", step, r)
+		}
+	}()
+
+	log.Debugf("googleLogin: starting for %s", email)
+	screenshot(page, "google_login_start.png")
 
 	// Handle "Choose an account" page
+	step = "choose-account"
 	if has, _, _ := page.HasX(`//span[contains(text(), 'Choose an account')]`); has {
+		log.Debugf("googleLogin: 'Choose an account' page")
 		if hasAcc, el, _ := page.HasX(`//div[@data-identifier='` + email + `']`); hasAcc {
 			el.MustClick()
 			goto inputPassword
 		}
 		if hasAnother, el, _ := page.HasX(`//div[contains(text(), 'Use another account')]`); hasAnother {
 			el.MustClick()
+			time.Sleep(3 * time.Second)
 		}
 	}
 
 	// Handle "Verify it's you" page
+	step = "verify-its-you"
 	if has, _, _ := page.HasX(`//span[contains(text(), 'Verify it')]`); has {
 		if hasNext, _, _ := page.HasX(`//span[contains(text(), 'Next')]//parent::button`); hasNext {
 			page.MustElementX(`//span[contains(text(), 'Next')]//parent::button`).MustClick()
@@ -169,16 +192,31 @@ func googleLogin(page *rod.Page, login Login) {
 	}
 
 	// Enter email
+	step = "email-input"
+	if has, _, _ := page.HasX(`//*[@id="identifierId"]`); !has {
+		screenshot(page, "google_login_no_email_field.png")
+		return fmt.Errorf("email field not found — unexpected Google login layout")
+	}
 	_ = page.MustElementX(`//*[@id="identifierId"]`).WaitVisible()
 	page.MustElementX(`//*[@id="identifierId"]`).MustInput(email).MustType()
+	// Verify the email actually landed (mirrors the AWS-SSO flow in sso.go).
+	if attr := page.MustElementX(`//*[@id="identifierId"]`).MustAttribute("data-initial-value"); attr == nil || *attr != email {
+		log.Warnf("googleLogin: email not filled correctly, retrying")
+		page.MustElementX(`//*[@id="identifierId"]`).MustSelectAllText().MustInput("").MustInput(email).MustType()
+	}
+	screenshot(page, "google_login_email_filled.png")
+	step = "email-next"
 	page.MustElementX(`//span[contains(text(), 'Next')]/parent::button`).MustClick().MustType(input.Enter)
 
 inputPassword:
+	step = "passkey-bypass"
 	time.Sleep(6 * time.Second)
+	screenshot(page, "google_login_after_email.png")
 	checkAndBypassPasskey(page)
 	checkAndBypassPasskey(page)
 
 	// Handle "Choose how you want to sign in"
+	step = "choose-signin-method"
 	if has, _, _ := page.HasX(`//span[contains(text(), 'Choose how you want to sign in')]`); has {
 		if hasPw, _, _ := page.HasX(`//div[contains(text(), 'Enter your password')]`); hasPw {
 			page.MustElementX(`//div[contains(text(), 'Enter your password')]//parent::div`).MustClick()
@@ -187,30 +225,72 @@ inputPassword:
 	}
 
 	// Enter password
+	step = "password-input"
+	if has, _, _ := page.HasX(`//input[@type="password"]`); !has {
+		screenshot(page, "google_login_no_password_field.png")
+		return fmt.Errorf("password field not found — flow may have diverged after email")
+	}
 	_ = page.MustElementX(`//input[@type="password"]`).WaitVisible()
 	page.MustElementX(`//input[@type="password"]`).MustInput(password)
+	screenshot(page, "google_login_password_filled.png")
+	step = "password-next"
 	page.MustElementX(`//span[contains(text(), 'Next')]/parent::button`).MustClick()
 	time.Sleep(5 * time.Second)
+	screenshot(page, "google_login_after_password.png")
 
-	// Check if 2FA is needed
+	// 2FA?
+	step = "2fa-detect"
 	if has2FA, _, _ := page.HasX(`//span[contains(text(), '2-Step Verification')]`); !has2FA {
-		log.Debugf("no 2FA required — login complete")
-		return
+		log.Debugf("googleLogin: no 2FA prompt — login complete")
+		return nil
 	}
+	log.Debugf("googleLogin: 2FA required")
+	screenshot(page, "google_login_2fa.png")
 
-	// 2FA
+	// If Google defaulted to another 2FA method, switch to "Try another way".
+	step = "2fa-try-another-way"
 	if has, _, _ := page.HasX(`//span[contains(text(), 'Try another way')]//parent::button`); has {
 		page.MustElementX(`//span[contains(text(), 'Try another way')]/parent::button`).MustClick()
 		time.Sleep(5 * time.Second)
+		screenshot(page, "google_login_2fa_options.png")
 	}
 
-	page.MustElementX(`//div[contains(text(), 'Get a verification code from the')]//parent::div`).MustClick()
+	// Select the authenticator-app option (if a chooser is shown).
+	step = "2fa-select-authenticator"
+	if has, _, _ := page.HasX(`//div[contains(text(), 'Get a verification code from the')]//parent::div`); has {
+		page.MustElementX(`//div[contains(text(), 'Get a verification code from the')]//parent::div`).MustClick()
+		time.Sleep(3 * time.Second)
+	} else {
+		log.Warnf("googleLogin: authenticator chooser not found — trying TOTP field directly")
+	}
 
+	// Enter the TOTP code
+	step = "2fa-totp-input"
+	if has, _, _ := page.HasX(`//input[@type="tel"]`); !has {
+		screenshot(page, "google_login_no_totp_field.png")
+		return fmt.Errorf("TOTP input not found — 2FA layout may have changed")
+	}
 	otpCode := totp.TOTP(login.TOTPSecret)
 	page.MustElementX(`//input[@type="tel"]`).MustInput(otpCode).MustType()
-	page.MustElementX(`//*[@id="totpNext"]`).MustClick()
-	time.Sleep(5 * time.Second)
-	log.Debugf("Google login completed for %s", email)
+	screenshot(page, "google_login_totp_filled.png")
+	step = "2fa-totp-submit"
+	if has, _, _ := page.HasX(`//*[@id="totpNext"]`); has {
+		page.MustElementX(`//*[@id="totpNext"]`).MustClick()
+	} else if hasNext, _, _ := page.HasX(`//span[contains(text(), 'Next')]/parent::button`); hasNext {
+		page.MustElementX(`//span[contains(text(), 'Next')]/parent::button`).MustClick()
+	}
+	time.Sleep(6 * time.Second)
+	screenshot(page, "google_login_after_totp.png")
+
+	// Verify we actually left the Google login domain.
+	step = "verify-complete"
+	finalURL := page.MustInfo().URL
+	if strings.Contains(finalURL, "accounts.google.com") {
+		screenshot(page, "google_login_stuck.png")
+		return fmt.Errorf("still on Google login after 2FA (%s) — password or TOTP may be rejected", finalURL)
+	}
+	log.Debugf("googleLogin: completed for %s, now at %s", email, finalURL)
+	return nil
 }
 
 // dismissPopup tries to close any modal/popup on the page.

@@ -271,7 +271,9 @@ func doLogin(browserDefaults Browser, targetURL string, login Login) (status str
 
 	// If redirected to Google, perform the login
 	if strings.Contains(afterClickURL, "accounts.google.com") {
-		googleLogin(page, login)
+		if loginErr := googleLogin(page, login); loginErr != nil {
+			return "error", "googleLogin failed: " + loginErr.Error()
+		}
 	} else {
 		log.Debugf("login: OAuth auto-completed (cached session)")
 	}
