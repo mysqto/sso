@@ -492,6 +492,12 @@ inputPassword:
 	screenshot(page, `google_login_2fa_options.png`)
 	savePage(page, "google_login_2fa_options.html")
 
+	// Bail out before generating an OTP if the account is already locked out.
+	// This is the check that stops the bleeding: once Google shows "Too many
+	// failed attempts" it hides the Authenticator option entirely, and every
+	// further attempt from here would spend another 2FA submission for nothing.
+	checkAuthActionRequired(page)
+
 	// click the "Authenticator app" option. Google has used several wordings;
 	// try each known variant and log the actual page on failure.
 	log.Debugf("clicking on the Authenticator app option")
@@ -538,6 +544,45 @@ inputPassword:
 	allow(page, samlDone)
 }
 
+// Exit codes for auth states that no amount of retrying can get past. Callers
+// (the credential server and its consumers) branch on these to back off instead
+// of looping — each retry costs a 2FA submission on the Google account, and
+// enough of them get the account rate-limited for hours.
+const (
+	ExitPasswordChangeRequired = 10 // Google demands a new password; needs a human
+	ExitAccountRateLimited     = 11 // 2FA locked after too many failed attempts
+)
+
+// checkAuthActionRequired exits with a distinct, non-retryable code when Google
+// is showing a page the automation can never get past. Callers invoke this only
+// after the screenshot/HTML dumps have been written, so the artifacts that make
+// a new interstitial diagnosable are always preserved.
+func checkAuthActionRequired(page *rod.Page) {
+	for _, marker := range []string{
+		`//*[contains(text(), 'Create a strong password')]`,
+		`//*[contains(text(), 'Create a new, strong password')]`,
+		`//*[contains(text(), 'Change your password')]`,
+		`//*[contains(text(), 'Update your password')]`,
+	} {
+		if has, _, _ := page.HasX(marker); has {
+			screenshot(page, `password_change_required.png`)
+			savePage(page, "password_change_required.html")
+			log.Errorf("Google requires a password change for this account (%s); "+
+				"reset the password manually and update the configured password. "+
+				"Retrying cannot succeed.", marker)
+			os.Exit(ExitPasswordChangeRequired)
+		}
+	}
+
+	if has, _, _ := page.HasX(`//*[contains(text(), 'Too many failed attempts')]`); has {
+		screenshot(page, `account_rate_limited.png`)
+		savePage(page, "account_rate_limited.html")
+		log.Errorf("Google has rate-limited 2FA on this account after too many " +
+			"failed attempts; logins will keep failing for several hours")
+		os.Exit(ExitAccountRateLimited)
+	}
+}
+
 func allow(page *rod.Page, samlDone chan struct{}) {
 	// wait for the SSO page to load
 	log.Debugf("waiting for 10 seconds for the SSO page to load")
@@ -552,6 +597,11 @@ func allow(page *rod.Page, samlDone chan struct{}) {
 	checkConfirmAndContinue(page)
 	screenshot(page, `sso_page_after_login.png`)
 	savePage(page, "sso_page_after_login.html")
+
+	// Landing here on anything other than the consent screen used to fall
+	// through to a generic "'Allow' button not found", which reads as transient
+	// and invites an immediate retry. Classify the known-permanent states first.
+	checkAuthActionRequired(page)
 
 	if hasAllow, allowBtn, _ := page.HasX(`//span[contains(text(), 'Allow')]/ancestor::button[1]`); hasAllow {
 		allowBtn.MustClick()
