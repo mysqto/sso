@@ -553,10 +553,55 @@ const (
 	ExitAccountRateLimited     = 11 // 2FA locked after too many failed attempts
 )
 
+// hasVisibleX reports whether the first node matching xpath is actually
+// rendered to the user.
+//
+// page.HasX only proves the node exists in the DOM, which is not the same
+// thing. Google pre-renders its sign-in error callouts hidden and flips them
+// on from JS when they apply: the "Too many failed attempts" banner sits in
+// a <section ... data-callout-type="2" aria-hidden="true" aria-live="assertive">
+// that is present on every page from the password step onward, including
+// sign-ins that are proceeding perfectly normally. Matching on DOM presence
+// alone therefore reported a permanent account lockout against a healthy 2FA
+// chooser, and since ExitAccountRateLimited is non-retryable by design the
+// caller gave up for hours instead of just picking the Authenticator option.
+//
+// Walk the ancestor chain rather than trusting the element alone — the markers
+// are text nodes inside a wrapper, so it is the wrapper that carries the
+// hidden/aria-hidden/display:none, not the match itself.
+func hasVisibleX(page *rod.Page, xpath string) bool {
+	has, el, err := page.HasX(xpath)
+	if err != nil || !has || el == nil {
+		return false
+	}
+
+	res, err := el.Eval(`() => {
+		for (let n = this; n; n = n.parentElement) {
+			if (n.hasAttribute('hidden')) return false
+			if (n.getAttribute('aria-hidden') === 'true') return false
+			const s = window.getComputedStyle(n)
+			if (s.display === 'none' || s.visibility === 'hidden' || s.visibility === 'collapse') return false
+		}
+		const box = this.getBoundingClientRect()
+		return box.width > 0 && box.height > 0
+	}`)
+	if err != nil {
+		// Treat an unevaluable node as not shown. Bailing out with a
+		// non-retryable exit code on a probe failure is the worse error.
+		log.Debugf("visibility probe failed for %s: %v", xpath, err)
+		return false
+	}
+
+	return res.Value.Bool()
+}
+
 // checkAuthActionRequired exits with a distinct, non-retryable code when Google
 // is showing a page the automation can never get past. Callers invoke this only
 // after the screenshot/HTML dumps have been written, so the artifacts that make
 // a new interstitial diagnosable are always preserved.
+//
+// Every marker below must be matched with hasVisibleX, never HasX: these exit
+// codes are non-retryable, so a false positive costs hours of downtime.
 func checkAuthActionRequired(page *rod.Page) {
 	for _, marker := range []string{
 		`//*[contains(text(), 'Create a strong password')]`,
@@ -564,7 +609,7 @@ func checkAuthActionRequired(page *rod.Page) {
 		`//*[contains(text(), 'Change your password')]`,
 		`//*[contains(text(), 'Update your password')]`,
 	} {
-		if has, _, _ := page.HasX(marker); has {
+		if hasVisibleX(page, marker) {
 			screenshot(page, `password_change_required.png`)
 			savePage(page, "password_change_required.html")
 			log.Errorf("Google requires a password change for this account (%s); "+
@@ -574,7 +619,7 @@ func checkAuthActionRequired(page *rod.Page) {
 		}
 	}
 
-	if has, _, _ := page.HasX(`//*[contains(text(), 'Too many failed attempts')]`); has {
+	if hasVisibleX(page, `//*[contains(text(), 'Too many failed attempts')]`) {
 		screenshot(page, `account_rate_limited.png`)
 		savePage(page, "account_rate_limited.html")
 		log.Errorf("Google has rate-limited 2FA on this account after too many " +
