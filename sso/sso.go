@@ -268,6 +268,13 @@ func Auth(args Args) {
 		htmlDir = args.Browser.ScreenshotPath
 	}
 	cleanupDir(screenshotDir)
+	// The html dumps carry a run counter and a timestamp, so no name ever
+	// repeats and nothing overwrites. Without this they grow without limit:
+	// one deployment reached 200 GB. Skip the second call when both names
+	// point at one directory, because the call above already cleaned it.
+	if htmlDir != screenshotDir {
+		cleanupDir(htmlDir)
+	}
 	browser, cleanup := browser(args.Browser)
 	if cleanup != nil {
 		defer cleanup()
