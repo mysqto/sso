@@ -320,10 +320,9 @@ func Auth(args Args) {
 	savePage(page, "sso_page_after_15_seconds.html")
 
 	log.Debugf("checking the 'Confirm and continue' button")
-	if hasConfirmAndContinue, _, _ := page.HasX(`//*[@id="cli_verification_btn"]`); hasConfirmAndContinue {
+	if hasConfirmAndContinue, btn, _ := page.HasX(confirmAndContinueX); hasConfirmAndContinue {
 		log.Debugf("Confirm and continue button found, clicking on it")
-		_ = page.MustElementX(`//*[@id="cli_verification_btn"]`).
-			MustClick()
+		btn.MustClick()
 		log.Debugf("clicked on the 'Confirm and continue' button")
 		screenshot(page, `sso_page_continue.png`)
 		log.Debugf("waiting for 5 seconds")
@@ -342,7 +341,7 @@ func Auth(args Args) {
 	screenshot(page, `google_login_page.png`)
 
 	// check do we have the allow button
-	if hasAllow, _, _ := page.HasX(`//span[contains(text(), 'Allow')]/ancestor::button[1]`); hasAllow {
+	if hasAllow, _, _ := page.HasX(allowX); hasAllow {
 		log.Debugf("Allow button found, clicking on it")
 		allow(page, samlDone)
 		return
@@ -473,7 +472,7 @@ inputPassword:
 	log.Debugf("waiting for 5 seconds")
 	time.Sleep(5 * time.Second)
 	// check do we have the allow button
-	if hasAllow, _, _ := page.HasX(`//span[contains(text(), 'Allow')]/ancestor::button[1]`); hasAllow {
+	if hasAllow, _, _ := page.HasX(allowX); hasAllow {
 		log.Debugf("Allow button found, clicking on it")
 		allow(page, samlDone)
 		return
@@ -655,7 +654,16 @@ func allow(page *rod.Page, samlDone chan struct{}) {
 	// and invites an immediate retry. Classify the known-permanent states first.
 	checkAuthActionRequired(page)
 
-	if hasAllow, allowBtn, _ := page.HasX(`//span[contains(text(), 'Allow')]/ancestor::button[1]`); hasAllow {
+	if samlDone == nil && hasVisibleX(page, approvedX) {
+		// The signin.aws flow can approve the request on 'Confirm and
+		// continue' alone, with no separate consent screen.
+		log.Debugln("Request approved without a consent screen")
+		screenshot(page, `sso_request_approved.png`)
+		page.MustClose()
+		return
+	}
+
+	if hasAllow, allowBtn, _ := page.HasX(allowX); hasAllow {
 		allowBtn.MustClick()
 		log.Debugf("SSO page loaded, clicked on the 'Allow' button")
 	} else if samlDone == nil {
@@ -675,12 +683,17 @@ func allow(page *rod.Page, samlDone chan struct{}) {
 		return
 	}
 
-	// wait for the `Request Approved` page to load
-	log.Debugf("waiting for the 'Request Approved' page to load")
-	page.MustElementX(`//div[contains(text(), 'Request approved')]`)
-	log.Debugf("Request Approved page loaded")
-
-	log.Debugln("Request approved")
+	// Wait for the `Request approved` page. The AWS CLI's own "Successfully
+	// logged into Start URL" is the authoritative signal and the caller
+	// waits for it, so a reworded page is logged rather than fatal.
+	log.Debugf("waiting for the 'Request approved' page to load")
+	if _, err := page.Timeout(30 * time.Second).ElementX(approvedX); err != nil {
+		log.Warnf("'Request approved' page not seen after 'Allow' (%v); "+
+			"leaving the AWS CLI to confirm the login", err)
+		savePage(page, "sso_page_after_allow.html")
+	} else {
+		log.Debugln("Request approved")
+	}
 	screenshot(page, `sso_request_approved.png`)
 	page.MustClose()
 }
@@ -853,13 +866,27 @@ func checkAndBypassPasskey(page *rod.Page) {
 	}
 }
 
+// AWS has shipped two device-code confirmation pages. The awsapps.com one
+// gives the button an id; the signin.aws one (since 2026-11-03) is an
+// unnamed submit button, and it comes after the Google login, not before.
+const confirmAndContinueX = `//*[@id="cli_verification_btn"] | ` +
+	`//button[.//span[normalize-space()='Confirm and continue']]`
+
+// The consent button reads "Allow" on the old page and "Allow access" on
+// the new one; contains() covers both.
+const allowX = `//span[contains(text(), 'Allow')]/ancestor::button[1]`
+
+// The final page after consent. Matched case-insensitively because the
+// wording has changed between page versions.
+const approvedX = `//*[contains(translate(normalize-space(text()), ` +
+	`'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'request approved')]`
+
 func checkConfirmAndContinue(page *rod.Page) {
 	log.Debugf("checking the 'Confirm and continue' button")
 	screenshot(page, `check_confirm_and_continue.png`)
-	if hasConfirmAndContinue, _, _ := page.HasX(`//*[@id="cli_verification_btn"]`); hasConfirmAndContinue {
+	if hasConfirmAndContinue, btn, _ := page.HasX(confirmAndContinueX); hasConfirmAndContinue {
 		log.Debugf("Confirm and continue button found, clicking on it")
-		_ = page.MustElementX(`//*[@id="cli_verification_btn"]`).
-			MustClick()
+		btn.MustClick()
 		log.Debugf("clicked on the 'Confirm and continue' button")
 		screenshot(page, `sso_page_continue.png`)
 		log.Debugf("waiting for 5 seconds")
