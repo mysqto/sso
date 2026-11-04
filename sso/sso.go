@@ -681,7 +681,7 @@ func allow(page *rod.Page, captureDone chan struct{}) {
 		log.Debugf("SSO page loaded, clicked on the 'Allow' button")
 	} else if captureDone == nil {
 		log.Fatalf("'Allow' button not found")
-	} else {
+	} else if !googleConsent(page, captureDone) {
 		log.Debugf("'Allow' button not present; waiting for the capture")
 	}
 
@@ -691,6 +691,8 @@ func allow(page *rod.Page, captureDone chan struct{}) {
 		case <-captureDone:
 			log.Debugf("capture completed")
 		case <-time.After(60 * time.Second):
+			screenshot(page, `capture_timeout.png`)
+			savePage(page, "capture_timeout.html")
 			log.Fatalf("timed out waiting for the capture")
 		}
 		return
@@ -709,6 +711,55 @@ func allow(page *rod.Page, captureDone chan struct{}) {
 	}
 	screenshot(page, `sso_request_approved.png`)
 	page.MustClose()
+}
+
+// The consent button on Google's own OAuth pages: "You're signing back in to
+// <app>" for a client already granted, and the scope list on a first grant or
+// when new scopes are asked for.
+const googleContinueX = `//span[normalize-space(text())='Continue']/ancestor::button[1]`
+
+// googleConsent clicks through Google's OAuth consent for a redirect capture,
+// and reports whether it found any. A first grant lists each scope with a
+// checkbox, unticked, and Google grants only the ticked ones, so every box is
+// ticked first: the request's scopes are what the caller asked for.
+//
+// It runs only in capture mode and only on accounts.google.com, so the AWS
+// flows, whose pages also say "Continue", never reach it.
+func googleConsent(page *rod.Page, captureDone chan struct{}) bool {
+	clicked := false
+	for i := 0; i < 3; i++ {
+		select {
+		case <-captureDone:
+			return true
+		default:
+		}
+		info, err := page.Info()
+		if err != nil || !strings.HasPrefix(info.URL, "https://accounts.google.com/") {
+			return clicked
+		}
+		screenshot(page, `google_oauth_consent.png`)
+		savePage(page, "google_oauth_consent.html")
+		has, btn, _ := page.HasX(googleContinueX + ` | ` + allowX)
+		if !has {
+			return clicked
+		}
+		if boxes, err := page.ElementsX(`//input[@type='checkbox']`); err == nil {
+			for _, box := range boxes {
+				_, _ = box.Eval(`() => { if (!this.checked) this.click() }`)
+			}
+			if len(boxes) > 0 {
+				log.Debugf("ticked %d scope checkbox(es) on the Google consent screen", len(boxes))
+			}
+		}
+		label, _ := btn.Text()
+		btn.MustClick()
+		clicked = true
+		log.Debugf("clicked %q on the Google consent screen", strings.TrimSpace(label))
+		if waitOrCapture(captureDone, 5*time.Second) {
+			return true
+		}
+	}
+	return clicked
 }
 
 // waitOrCapture waits for the given duration unless captureDone fires first.
