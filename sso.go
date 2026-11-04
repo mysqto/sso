@@ -66,6 +66,8 @@ func parseArgs() (args sso.Args, errors []string) {
 	runFileArg := flag.String("run-file", "", "Run file path")
 	samlOutputArg := flag.String("saml-output", "", "Capture SAMLResponse to this path ('-' for stdout); when set the device-approval step is skipped")
 	samlSkipArg := flag.Int("saml-skip", 0, "Number of leading SAMLResponse POSTs to let through before capturing (useful for chained IdPs like AWS SSO)")
+	redirectCaptureArg := flag.String("redirect-capture", "", "Capture the first request to a URL with this prefix (an OAuth loopback redirect URI) and abort it; when set the device-approval step is skipped")
+	redirectOutputArg := flag.String("redirect-output", "-", "Path the captured redirect is written to ('-' for stdout)")
 	flag.Parse()
 
 	var mode, remoteURL string
@@ -84,6 +86,11 @@ func parseArgs() (args sso.Args, errors []string) {
 	browserTimeoutStr := getOptionalArg(browserTimeoutArg, "BROWSER_TIMEOUT")
 	args.RunFile = getOptionalArg(runFileArg, "RUN_FILE")
 	args.Login.SAMLOutput = getOptionalArg(samlOutputArg, "SSO_SAML_OUTPUT")
+	args.Login.RedirectCapture = *redirectCaptureArg
+	args.Login.RedirectOutput = *redirectOutputArg
+	if args.Login.RedirectCapture != "" && args.Login.SAMLOutput != "" {
+		errors = append(errors, "--redirect-capture and --saml-output are mutually exclusive")
+	}
 	if samlSkipArg != nil {
 		args.Login.SAMLSkip = *samlSkipArg
 	}

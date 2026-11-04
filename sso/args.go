@@ -51,6 +51,11 @@ type Login struct {
 	TOTPSecret string
 	SAMLOutput string
 	SAMLSkip   int
+	// RedirectCapture, when set, is a URL prefix such as an OAuth client's
+	// loopback redirect URI. The first request to it is captured to
+	// RedirectOutput and aborted, and the device-approval step is skipped.
+	RedirectCapture string
+	RedirectOutput  string
 }
 
 // Args defines the arguments for the sso

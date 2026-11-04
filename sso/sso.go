@@ -281,10 +281,17 @@ func Auth(args Args) {
 	}
 	defer browser.MustClose()
 
-	var samlDone chan struct{}
-	if args.Login.SAMLOutput != "" {
+	// captureDone closes once a capture mode has what it came for. Both modes
+	// end the flow at the same point, so it replaces the device approval.
+	var captureDone chan struct{}
+	switch {
+	case args.Login.RedirectCapture != "":
 		var stop func()
-		samlDone, stop = captureSAML(browser, args.Login.SAMLOutput, args.Login.SAMLSkip)
+		captureDone, stop = captureRedirect(browser, args.Login.RedirectCapture, args.Login.RedirectOutput)
+		defer stop()
+	case args.Login.SAMLOutput != "":
+		var stop func()
+		captureDone, stop = captureSAML(browser, args.Login.SAMLOutput, args.Login.SAMLSkip)
 		defer stop()
 	}
 
@@ -306,14 +313,20 @@ func Auth(args Args) {
 		},
 		Title: "MacBook Pro 14-inch, 2023",
 	})
-	log.Debugf("opening SSO page %s", targetURL)
+	if args.Login.RedirectCapture != "" {
+		// An OAuth authorize URL carries the client's state and PKCE
+		// challenge. Neither is a secret, but neither belongs in a log.
+		log.Debugf("opening SSO page %s", strings.SplitN(targetURL, "?", 2)[0])
+	} else {
+		log.Debugf("opening SSO page %s", targetURL)
+	}
 	page.MustNavigate(targetURL)
 	if err := page.WaitLoad(); err != nil {
 		log.Debugf("WaitLoad returned error (likely page redirect): %v — continuing", err)
 	}
 	log.Debugf("waiting 15 seconds for the page to load")
-	if waitOrSAML(samlDone, 15*time.Second) {
-		log.Debugf("SAML response captured before any interaction was required")
+	if waitOrCapture(captureDone, 15*time.Second) {
+		log.Debugf("capture completed before any interaction was required")
 		return
 	}
 	screenshot(page, `sso_page_after_15_seconds.png`)
@@ -343,7 +356,7 @@ func Auth(args Args) {
 	// check do we have the allow button
 	if hasAllow, _, _ := page.HasX(allowX); hasAllow {
 		log.Debugf("Allow button found, clicking on it")
-		allow(page, samlDone)
+		allow(page, captureDone)
 		return
 	}
 
@@ -474,7 +487,7 @@ inputPassword:
 	// check do we have the allow button
 	if hasAllow, _, _ := page.HasX(allowX); hasAllow {
 		log.Debugf("Allow button found, clicking on it")
-		allow(page, samlDone)
+		allow(page, captureDone)
 		return
 	}
 
@@ -547,7 +560,7 @@ inputPassword:
 	screenshot(page, `google_login_2fa_after_otp_next.png`)
 
 	// allow the SSO page
-	allow(page, samlDone)
+	allow(page, captureDone)
 }
 
 // Exit codes for auth states that no amount of retrying can get past. Callers
@@ -634,11 +647,11 @@ func checkAuthActionRequired(page *rod.Page) {
 	}
 }
 
-func allow(page *rod.Page, samlDone chan struct{}) {
+func allow(page *rod.Page, captureDone chan struct{}) {
 	// wait for the SSO page to load
 	log.Debugf("waiting for 10 seconds for the SSO page to load")
-	if waitOrSAML(samlDone, 10*time.Second) {
-		log.Debugf("SAML response captured before clicking 'Allow'")
+	if waitOrCapture(captureDone, 10*time.Second) {
+		log.Debugf("capture completed before clicking 'Allow'")
 		return
 	}
 	// Some Chrome builds (e.g. macOS) show a 'Simplify your sign-in' /
@@ -654,7 +667,7 @@ func allow(page *rod.Page, samlDone chan struct{}) {
 	// and invites an immediate retry. Classify the known-permanent states first.
 	checkAuthActionRequired(page)
 
-	if samlDone == nil && hasVisibleX(page, approvedX) {
+	if captureDone == nil && hasVisibleX(page, approvedX) {
 		// The signin.aws flow can approve the request on 'Confirm and
 		// continue' alone, with no separate consent screen.
 		log.Debugln("Request approved without a consent screen")
@@ -666,19 +679,19 @@ func allow(page *rod.Page, samlDone chan struct{}) {
 	if hasAllow, allowBtn, _ := page.HasX(allowX); hasAllow {
 		allowBtn.MustClick()
 		log.Debugf("SSO page loaded, clicked on the 'Allow' button")
-	} else if samlDone == nil {
+	} else if captureDone == nil {
 		log.Fatalf("'Allow' button not found")
 	} else {
-		log.Debugf("'Allow' button not present; waiting for SAML response")
+		log.Debugf("'Allow' button not present; waiting for the capture")
 	}
 
-	if samlDone != nil {
-		log.Debugf("waiting for SAML response capture (up to 60s)")
+	if captureDone != nil {
+		log.Debugf("waiting for the capture (up to 60s)")
 		select {
-		case <-samlDone:
-			log.Debugf("SAML response captured")
+		case <-captureDone:
+			log.Debugf("capture completed")
 		case <-time.After(60 * time.Second):
-			log.Fatalf("timed out waiting for SAML response")
+			log.Fatalf("timed out waiting for the capture")
 		}
 		return
 	}
@@ -698,15 +711,15 @@ func allow(page *rod.Page, samlDone chan struct{}) {
 	page.MustClose()
 }
 
-// waitOrSAML waits for the given duration unless samlDone fires first.
-// Returns true if samlDone fired (caller should bail out of the flow).
-func waitOrSAML(samlDone chan struct{}, d time.Duration) bool {
-	if samlDone == nil {
+// waitOrCapture waits for the given duration unless captureDone fires first.
+// Returns true if captureDone fired (caller should bail out of the flow).
+func waitOrCapture(captureDone chan struct{}, d time.Duration) bool {
+	if captureDone == nil {
 		time.Sleep(d)
 		return false
 	}
 	select {
-	case <-samlDone:
+	case <-captureDone:
 		return true
 	case <-time.After(d):
 		return false
