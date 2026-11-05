@@ -353,6 +353,19 @@ func Auth(args Args) {
 	log.Debugf("waiting for the Allow/Google login page to load")
 	screenshot(page, `google_login_page.png`)
 
+	// While the identity session is still alive, signin.aws approves the
+	// device request on 'Confirm and continue' alone: no Google page and no
+	// consent screen. allow() knows this page, but it runs only after an
+	// Allow button or a Google sign-in, so without this check the flow went
+	// on to wait for Google's email box, which never comes, and panicked
+	// minutes later with the request already approved.
+	if captureDone == nil && hasVisibleX(page, approvedX) {
+		log.Debugln("Request approved on 'Confirm and continue'; no sign-in needed")
+		screenshot(page, `sso_request_approved.png`)
+		page.MustClose()
+		return
+	}
+
 	// check do we have the allow button
 	if hasAllow, _, _ := page.HasX(allowX); hasAllow {
 		log.Debugf("Allow button found, clicking on it")
