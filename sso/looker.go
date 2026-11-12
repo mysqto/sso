@@ -26,12 +26,13 @@ const (
 	lookerPasswordX = `//input[@id='login-password']`
 	lookerSubmitX   = `//*[@id='login-submit']`
 	lookerRememberX = `//input[@name='remember' and @type='checkbox']`
-	// The authenticator-code box: a visible text-like input whose name or id
-	// mentions a code or verification, on a Looker page.
-	lookerCodeX = `//input[(@type='text' or @type='tel' or @type='number' or not(@type)) and ` +
-		`(contains(@name,'code') or contains(@id,'code') or contains(@name,'verification') or ` +
-		`contains(@id,'verification') or contains(@name,'token') or contains(@autocomplete,'one-time-code'))]`
-	lookerFormSubmitX = `//button[@type='submit'] | //input[@type='submit']`
+	// The authenticator-code page: a form posting to /login/totp with one
+	// number box named totp, a "Verify Code" submit and a "Stay logged in.
+	// This is a trusted computer" checkbox.
+	lookerCodeFormX     = `//form[contains(@action,'/login/totp')]`
+	lookerCodeX         = lookerCodeFormX + `//input[@name='totp']`
+	lookerCodeSubmitX   = lookerCodeFormX + `//*[@type='submit']`
+	lookerCodeRememberX = lookerCodeFormX + `//input[@name='remember' and @type='checkbox']`
 	// The OAuth approval button. Looker words it more than one way.
 	lookerApproveX = `//button[normalize-space(.)='Allow' or normalize-space(.)='Authorize' or ` +
 		`normalize-space(.)='Approve' or normalize-space(.)='Accept' or normalize-space(.)='Continue'] | ` +
@@ -126,7 +127,12 @@ func lookerCodeStep(page *rod.Page, login Login) {
 	screenshot(page, `looker_code_page.png`)
 	savePage(page, "looker_code_page.html")
 	page.MustElementX(lookerCodeX).MustSelectAllText().MustInput(totp.TOTP(login.TOTPSecret))
-	if has, btn, _ := page.HasX(lookerFormSubmitX); has {
+	// Trusted, the browser profile keeps the Looker session, so a later
+	// sign-in goes straight to the approval page without a code.
+	if has, box, _ := page.HasX(lookerCodeRememberX); has {
+		_, _ = box.Eval(`() => { if (!this.checked) this.click() }`)
+	}
+	if has, btn, _ := page.HasX(lookerCodeSubmitX); has {
 		btn.MustClick()
 	} else {
 		page.Keyboard.MustType(input.Enter)
