@@ -332,6 +332,13 @@ func Auth(args Args) {
 	screenshot(page, `sso_page_after_15_seconds.png`)
 	savePage(page, "sso_page_after_15_seconds.html")
 
+	// Looker has its own account, form and authenticator: nothing below
+	// (signin.aws, Google) applies to it.
+	if captureDone != nil && onLooker(page) {
+		lookerFlow(page, args.Login, captureDone)
+		return
+	}
+
 	log.Debugf("checking the 'Confirm and continue' button")
 	if hasConfirmAndContinue, btn, _ := page.HasX(confirmAndContinueX); hasConfirmAndContinue {
 		log.Debugf("Confirm and continue button found, clicking on it")
